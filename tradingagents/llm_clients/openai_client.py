@@ -22,6 +22,7 @@ _PASSTHROUGH_KWARGS = (
     "callbacks",
     "http_client",
     "http_async_client",
+    "default_headers",
 )
 
 _PROVIDER_CONFIG = {
@@ -71,6 +72,10 @@ class OpenAIClient(BaseLLMClient):
         for key in _PASSTHROUGH_KWARGS:
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
+
+        user_agent = os.getenv("OPENAI_COMPAT_USER_AGENT")
+        if user_agent and "default_headers" not in llm_kwargs:
+            llm_kwargs["default_headers"] = {"User-Agent": user_agent, "Accept": "application/json"}
 
         return NormalizedChatOpenAI(**llm_kwargs)
 

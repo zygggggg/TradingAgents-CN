@@ -206,19 +206,32 @@ def run_stock_analysis(stock_symbol, analysis_date, analysts, research_depth, ll
 
         update_progress(f"💰 预估分析成本: ¥{estimated_cost:.4f}")
 
-    # 验证环境变量
+    # 验证当前模型提供商所需的环境变量
     update_progress("检查环境变量配置...")
-    dashscope_key = os.getenv("DASHSCOPE_API_KEY")
-    finnhub_key = os.getenv("FINNHUB_API_KEY")
+    required_key_by_provider = {
+        "dashscope": "DASHSCOPE_API_KEY",
+        "alibaba": "DASHSCOPE_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "google": "GOOGLE_API_KEY",
+        "qianfan": "QIANFAN_API_KEY",
+        "custom_openai": "CUSTOM_OPENAI_API_KEY",
+    }
+    required_key = required_key_by_provider.get(llm_provider)
 
-    logger.info(f"环境变量检查:")
-    logger.info(f"  DASHSCOPE_API_KEY: {'已设置' if dashscope_key else '未设置'}")
-    logger.info(f"  FINNHUB_API_KEY: {'已设置' if finnhub_key else '未设置'}")
+    logger.info("环境变量检查:")
+    if required_key:
+        required_value = os.getenv(required_key)
+        logger.info(f"  {required_key}: {'已设置' if required_value else '未设置'}")
+        if not required_value:
+            raise ValueError(f"{required_key} 环境变量未设置")
 
-    if not dashscope_key:
-        raise ValueError("DASHSCOPE_API_KEY 环境变量未设置")
-    if not finnhub_key:
-        raise ValueError("FINNHUB_API_KEY 环境变量未设置")
+    if market_type == "美股":
+        finnhub_key = os.getenv("FINNHUB_API_KEY")
+        logger.info(f"  FINNHUB_API_KEY: {'已设置' if finnhub_key else '未设置'}")
+        if not finnhub_key:
+            raise ValueError("FINNHUB_API_KEY 环境变量未设置")
 
     update_progress("环境变量验证通过")
 
@@ -368,8 +381,13 @@ def run_stock_analysis(stock_symbol, analysis_date, analysts, research_depth, ll
             logger.info(f"🌐 [SiliconFlow] 使用模型: {llm_model}")
             logger.info(f"🌐 [SiliconFlow] API端点: https://api.siliconflow.cn/v1")
         elif llm_provider == "custom_openai":
-            # 自定义OpenAI端点
-            custom_base_url = st.session_state.get("custom_openai_base_url", "https://api.openai.com/v1")
+            # 自定义OpenAI端点；兼容 Streamlit UI 与终端脚本调用
+            custom_base_url = os.getenv("CUSTOM_OPENAI_BASE_URL", "https://api.openai.com/v1")
+            try:
+                import streamlit as st
+                custom_base_url = st.session_state.get("custom_openai_base_url", custom_base_url)
+            except Exception:
+                pass
             config["backend_url"] = custom_base_url
             config["custom_openai_base_url"] = custom_base_url
             logger.info(f"🔧 [自定义OpenAI] 使用模型: {llm_model}")
@@ -504,6 +522,27 @@ def run_stock_analysis(stock_symbol, analysis_date, analysts, research_depth, ll
         # 从决策中提取模型信息
         model_info = decision.get('model_info', 'Unknown') if isinstance(decision, dict) else 'Unknown'
 
+        # 生成离线量化评分，用于约束LLM投研观点；失败不影响主报告
+        quant_analysis = None
+        try:
+            update_progress("📊 正在生成量化评分...")
+            from tradingagents.quant import generate_quant_report
+
+            quant_analysis, quant_report = generate_quant_report(
+                stock_symbol=stock_symbol,
+                analysis_date=analysis_date,
+                market_type=market_type,
+                fundamentals_report=state.get('fundamentals_report') if isinstance(state, dict) else None,
+            )
+            if quant_report:
+                state['quant_report'] = quant_report
+            if quant_analysis:
+                state['quant_analysis'] = quant_analysis
+            logger.info(f"📊 [量化评分] {stock_symbol}: {quant_analysis.get('score') if quant_analysis else 'N/A'}")
+        except Exception as quant_error:
+            logger.warning(f"⚠️ [量化评分] 生成失败: {quant_error}")
+            state['quant_report'] = f"## 📊 量化评分\n\n量化评分生成失败：{quant_error}\n\n主报告仍可正常使用。"
+
         results = {
             'stock_symbol': stock_symbol,
             'analysis_date': analysis_date,
@@ -514,6 +553,7 @@ def run_stock_analysis(stock_symbol, analysis_date, analysts, research_depth, ll
             'model_info': model_info,  # 🔥 添加模型信息字段
             'state': state,
             'decision': decision,
+            'quant_analysis': quant_analysis,
             'success': True,
             'error': None,
             'session_id': session_id if TOKEN_TRACKING_ENABLED else None
@@ -710,6 +750,7 @@ def format_analysis_results(results):
     analysis_keys = [
         'market_report',
         'fundamentals_report',
+        'quant_report',
         'sentiment_report',
         'news_report',
         'risk_assessment',

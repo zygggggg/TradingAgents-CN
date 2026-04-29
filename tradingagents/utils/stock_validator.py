@@ -345,6 +345,22 @@ class StockDataPreparer:
         data_synced = False
 
         try:
+            integrated_info = None
+            try:
+                from tradingagents.dataflows.providers.china.integrated import (
+                    get_integrated_china_stock_info,
+                    is_valid_stock_info,
+                )
+
+                integrated_info = get_integrated_china_stock_info(stock_code)
+                if is_valid_stock_info(integrated_info, stock_code):
+                    stock_name = integrated_info.get('name', stock_name)
+                    has_basic_info = True
+                    logger.info(f"✅ [A股统一数据源] 基本信息获取成功: {stock_code} - {stock_name}")
+                    cache_status += f"基本信息来自{integrated_info.get('source', 'integrated')}; "
+            except Exception as e:
+                logger.warning(f"⚠️ [A股统一数据源] 基本信息获取异常，继续旧链路: {e}")
+
             # 1. 检查数据库中的数据是否存在和最新
             logger.debug(f"📊 [A股数据] 检查数据库中{stock_code}的数据...")
             db_check_result = self._check_database_data(stock_code, extended_start_date_str, end_date_str)
@@ -373,7 +389,9 @@ class StockDataPreparer:
 
             stock_info = get_china_stock_info_unified(stock_code)
 
-            if stock_info and "❌" not in stock_info and "未能获取" not in stock_info:
+            if has_basic_info:
+                logger.info(f"✅ [A股数据] 跳过旧基本信息校验，使用统一数据源结果: {stock_code} - {stock_name}")
+            elif stock_info and "❌" not in stock_info and "未能获取" not in stock_info:
                 # 解析股票名称
                 if "股票名称:" in stock_info:
                     lines = stock_info.split('\n')

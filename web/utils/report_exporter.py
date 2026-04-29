@@ -36,6 +36,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+STOCK_NAME_MAP = {
+    "002410": "广联达",
+    "002625": "光启技术",
+    "603588": "高能环境",
+    "603881": "数据港",
+}
+
+
+def _safe_stock_folder(stock_symbol: str, results: Optional[Dict[str, Any]] = None) -> str:
+    results = results or {}
+    state = results.get('state') if isinstance(results.get('state'), dict) else {}
+    candidates = [
+        results.get('stock_name'),
+        results.get('company_name'),
+        state.get('stock_name') if state else None,
+        state.get('company_name') if state else None,
+        STOCK_NAME_MAP.get(str(stock_symbol)),
+        stock_symbol,
+    ]
+    for candidate in candidates:
+        if candidate:
+            folder = ''.join(ch for ch in str(candidate).strip() if ch not in '\\/:*?"<>|').replace(' ', '')
+            if folder:
+                return folder
+    return str(stock_symbol)
+
 # 导入Docker适配器
 try:
     from .docker_pdf_adapter import (
@@ -60,18 +86,22 @@ try:
     # 导入pypandoc（用于markdown转docx和pdf）
     import pypandoc
 
-    # 检查pandoc是否可用，如果不可用则尝试下载
+    # 检查pandoc是否可用。默认不自动下载，避免国内网络环境下阻塞首页加载。
     try:
         pypandoc.get_pandoc_version()
         PANDOC_AVAILABLE = True
     except OSError:
-        logger.warning(f"⚠️ 未找到pandoc，正在尝试自动下载...")
-        try:
-            pypandoc.download_pandoc()
-            PANDOC_AVAILABLE = True
-            logger.info(f"✅ pandoc下载成功！")
-        except Exception as download_error:
-            logger.error(f"❌ pandoc下载失败: {download_error}")
+        if os.getenv("AUTO_DOWNLOAD_PANDOC", "false").lower() == "true":
+            logger.warning(f"⚠️ 未找到pandoc，正在尝试自动下载...")
+            try:
+                pypandoc.download_pandoc()
+                PANDOC_AVAILABLE = True
+                logger.info(f"✅ pandoc下载成功！")
+            except Exception as download_error:
+                logger.error(f"❌ pandoc下载失败: {download_error}")
+                PANDOC_AVAILABLE = False
+        else:
+            logger.warning("⚠️ 未找到pandoc，已跳过自动下载；Word/PDF导出暂不可用")
             PANDOC_AVAILABLE = False
 
     EXPORT_AVAILABLE = True
@@ -103,7 +133,7 @@ class ReportExporter:
             logger.info("🐳 检测到Docker环境，初始化PDF支持...")
             logger.info(f"🐳 检测到Docker环境，初始化PDF支持...")
             setup_xvfb_display()
-    
+
     def _clean_text_for_markdown(self, text: str) -> str:
         """清理文本中可能导致YAML解析问题的字符"""
         if not text:
@@ -170,10 +200,10 @@ class ReportExporter:
         decision = results.get('decision', {})
         state = results.get('state', {})
         is_demo = results.get('is_demo', False)
-        
+
         # 生成时间戳
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
+
         # 清理关键数据
         action = self._clean_text_for_markdown(decision.get('action', 'N/A')).upper()
         target_price = self._clean_text_for_markdown(decision.get('target_price', 'N/A'))
@@ -214,21 +244,22 @@ class ReportExporter:
 ## 📊 详细分析报告
 
 """
-        
+
         # 添加各个分析模块的内容 - 与CLI端保持一致的完整结构
         analysis_modules = [
             ('market_report', '📈 市场技术分析', '技术指标、价格趋势、支撑阻力位分析'),
             ('fundamentals_report', '💰 基本面分析', '财务数据、估值水平、盈利能力分析'),
+            ('quant_report', '📊 量化评分', '多因子评分、仓位约束与风险提示'),
             ('sentiment_report', '💭 市场情绪分析', '投资者情绪、社交媒体情绪指标'),
             ('news_report', '📰 新闻事件分析', '相关新闻事件、市场动态影响分析'),
             ('risk_assessment', '⚠️ 风险评估', '风险因素识别、风险等级评估'),
             ('investment_plan', '📋 投资建议', '具体投资策略、仓位管理建议')
         ]
-        
+
         for key, title, description in analysis_modules:
             md_content += f"\n### {title}\n\n"
             md_content += f"*{description}*\n\n"
-            
+
             if key in state and state[key]:
                 content = state[key]
                 if isinstance(content, str):
@@ -261,7 +292,7 @@ class ReportExporter:
 ---
 *报告生成时间: {timestamp}*
 """
-        
+
         return md_content
 
     def _add_team_decision_reports(self, md_content: str, state: Dict[str, Any]) -> str:
@@ -440,8 +471,8 @@ class ReportExporter:
         except Exception as e:
             logger.error(f"❌ Word文档生成失败: {e}", exc_info=True)
             raise Exception(f"生成Word文档失败: {e}")
-    
-    
+
+
     def generate_pdf_report(self, results: Dict[str, Any]) -> bytes:
         """生成PDF格式的报告"""
 
@@ -540,7 +571,7 @@ class ReportExporter:
 3. 使用Markdown或Word格式导出作为替代方案
 """
         raise Exception(error_msg)
-    
+
     def export_report(self, results: Dict[str, Any], format_type: str) -> Optional[bytes]:
         """导出报告为指定格式"""
 
@@ -660,7 +691,7 @@ def save_modular_reports_to_results_dir(results: Dict[str, Any], stock_symbol: s
 
         # 创建股票专用目录
         analysis_date = datetime.now().strftime('%Y-%m-%d')
-        stock_dir = results_dir / stock_symbol / analysis_date
+        stock_dir = results_dir / _safe_stock_folder(stock_symbol, results) / analysis_date
         reports_dir = stock_dir / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
 
@@ -692,6 +723,11 @@ def save_modular_reports_to_results_dir(results: Dict[str, Any], stock_symbol: s
                 'filename': 'fundamentals_report.md',
                 'title': f'{stock_symbol} 基本面分析报告',
                 'state_key': 'fundamentals_report'
+            },
+            'quant_report': {
+                'filename': 'quant_report.md',
+                'title': f'{stock_symbol} 量化评分报告',
+                'state_key': 'quant_report'
             },
             'investment_plan': {
                 'filename': 'investment_plan.md',
@@ -875,7 +911,7 @@ def save_report_to_results_dir(content: bytes, filename: str, stock_symbol: str)
 
         # 创建股票专用目录
         analysis_date = datetime.now().strftime('%Y-%m-%d')
-        stock_dir = results_dir / stock_symbol / analysis_date / "reports"
+        stock_dir = results_dir / _safe_stock_folder(stock_symbol) / analysis_date / "reports"
         stock_dir.mkdir(parents=True, exist_ok=True)
 
         # 保存文件
@@ -949,13 +985,13 @@ def render_export_buttons(results: Dict[str, Any]):
 
         # 在Docker环境下，即使pandoc有问题也显示所有按钮，让用户尝试
         pass
-    
+
     # 生成文件名
     stock_symbol = results.get('stock_symbol', 'analysis')
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    
+
     col1, col2, col3 = st.columns(3)
-    
+
     with col1:
         if st.button("📄 导出 Markdown", help="导出为Markdown格式"):
             logger.info(f"🖱️ [EXPORT] 用户点击Markdown导出按钮 - 股票: {stock_symbol}")
@@ -995,7 +1031,7 @@ def render_export_buttons(results: Dict[str, Any]):
             else:
                 logger.error(f"❌ [EXPORT] Markdown导出失败，content为空")
                 logger.error("❌ Markdown导出失败，content为空")
-    
+
     with col2:
         if st.button("📝 导出 Word", help="导出为Word文档格式"):
             logger.info(f"🖱️ [EXPORT] 用户点击Word导出按钮 - 股票: {stock_symbol}")
@@ -1072,7 +1108,7 @@ def render_export_buttons(results: Dict[str, Any]):
 
                         3. **替代方案**: 使用Markdown格式导出
                         """)
-    
+
     with col3:
         if st.button("📊 导出 PDF", help="导出为PDF格式 (需要额外工具)"):
             logger.info(f"🖱️ 用户点击PDF导出按钮 - 股票: {stock_symbol}")
@@ -1162,16 +1198,16 @@ def render_export_buttons(results: Dict[str, Any]):
                     st.info("💡 建议：您可以先使用Markdown或Word格式导出，然后使用其他工具转换为PDF")
 
 
-def save_analysis_report(stock_symbol: str, analysis_results: Dict[str, Any], 
+def save_analysis_report(stock_symbol: str, analysis_results: Dict[str, Any],
                         report_content: str = None) -> bool:
     """
     保存分析报告到MongoDB
-    
+
     Args:
         stock_symbol: 股票代码
         analysis_results: 分析结果字典
         report_content: 报告内容（可选，如果不提供则自动生成）
-    
+
     Returns:
         bool: 保存是否成功
     """
@@ -1179,33 +1215,33 @@ def save_analysis_report(stock_symbol: str, analysis_results: Dict[str, Any],
         if not MONGODB_REPORT_AVAILABLE or mongodb_report_manager is None:
             logger.warning("MongoDB报告管理器不可用，无法保存报告")
             return False
-        
+
         # 如果没有提供报告内容，则生成Markdown报告
         if report_content is None:
             report_content = report_exporter.generate_markdown_report(analysis_results)
-        
+
         # 调用MongoDB报告管理器保存报告
         # 将报告内容包装成字典格式
         reports_dict = {
             "markdown": report_content,
             "generated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
-        
+
         success = mongodb_report_manager.save_analysis_report(
             stock_symbol=stock_symbol,
             analysis_results=analysis_results,
             reports=reports_dict
         )
-        
+
         if success:
             logger.info(f"✅ 分析报告已成功保存到MongoDB - 股票: {stock_symbol}")
         else:
             logger.error(f"❌ 分析报告保存到MongoDB失败 - 股票: {stock_symbol}")
-        
+
         return success
-        
+
     except Exception as e:
         logger.error(f"❌ 保存分析报告到MongoDB时发生异常 - 股票: {stock_symbol}, 错误: {str(e)}")
         return False
-    
- 
+
+

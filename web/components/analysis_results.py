@@ -1262,6 +1262,7 @@ def render_detailed_analysis_content(selected_result):
         report_display_names = {
             'final_trade_decision': '🎯 最终交易决策',
             'fundamentals_report': '💰 基本面分析',
+            'quant_report': '📊 量化评分',
             'technical_report': '📈 技术面分析',
             'market_sentiment_report': '💭 市场情绪分析',
             'risk_assessment_report': '⚠️ 风险评估',
@@ -1374,6 +1375,12 @@ def render_detailed_analysis_content(selected_result):
             'title': '💰 基本面分析',
             'icon': '💰',
             'description': '财务数据、估值水平、盈利能力分析'
+        },
+        {
+            'key': 'quant_report',
+            'title': '📊 量化评分',
+            'icon': '📊',
+            'description': '多因子评分、仓位约束与风险提示'
         },
         {
             'key': 'sentiment_report',
@@ -1715,6 +1722,7 @@ def show_expanded_detail(result):
                     analysis_fields = [
                         ('market_report', '📈 市场分析'),
                         ('fundamentals_report', '💰 基本面分析'),
+                        ('quant_report', '📊 量化评分'),
                         ('sentiment_report', '💭 情感分析'),
                         ('news_report', '📰 新闻分析'),
                         ('risk_assessment', '⚠️ 风险评估'),
@@ -1758,6 +1766,7 @@ def show_expanded_detail(result):
         report_display_names = {
             'final_trade_decision': '🎯 最终交易决策',
             'fundamentals_report': '💰 基本面分析',
+            'quant_report': '📊 量化评分',
             'technical_report': '📈 技术面分析',
             'market_sentiment_report': '💭 市场情绪分析',
             'risk_assessment_report': '⚠️ 风险评估',

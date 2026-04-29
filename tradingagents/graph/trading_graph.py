@@ -682,6 +682,17 @@ class TradingAgentsGraph:
         # 保存task_id用于后续保存性能数据
         self._current_task_id = task_id
 
+        def merge_stream_chunk(final_state, chunk):
+            """Merge LangGraph stream chunks across values/updates modes."""
+            if args.get("stream_mode") == "values":
+                return chunk
+            if final_state is None:
+                final_state = init_agent_state.copy()
+            for node_name, node_update in chunk.items():
+                if not str(node_name).startswith('__') and isinstance(node_update, dict):
+                    final_state.update(node_update)
+            return final_state
+
         # 根据是否有进度回调选择不同的stream_mode
         args = self.propagator.get_graph_args(use_progress_callback=bool(progress_callback))
 
@@ -709,12 +720,7 @@ class TradingAgentsGraph:
                 if progress_callback and args.get("stream_mode") == "updates":
                     # updates 模式：chunk = {"Market Analyst": {...}}
                     self._send_progress_update(chunk, progress_callback)
-                    # 累积状态更新
-                    if final_state is None:
-                        final_state = init_agent_state.copy()
-                    for node_name, node_update in chunk.items():
-                        if not node_name.startswith('__'):
-                            final_state.update(node_update)
+                    final_state = merge_stream_chunk(final_state, chunk)
                 else:
                     # values 模式：chunk = {"messages": [...], ...}
                     if len(chunk.get("messages", [])) > 0:
@@ -751,12 +757,7 @@ class TradingAgentsGraph:
                             break
 
                     self._send_progress_update(chunk, progress_callback)
-                    # 累积状态更新
-                    if final_state is None:
-                        final_state = init_agent_state.copy()
-                    for node_name, node_update in chunk.items():
-                        if not node_name.startswith('__'):
-                            final_state.update(node_update)
+                    final_state = merge_stream_chunk(final_state, chunk)
             else:
                 # 原有的invoke模式（也需要计时）
                 logger.info("⏱️ 使用 invoke 模式执行分析（无进度回调）")
@@ -778,12 +779,7 @@ class TradingAgentsGraph:
                             current_node_start = time.time()
                             break
 
-                    # 累积状态更新
-                    if final_state is None:
-                        final_state = init_agent_state.copy()
-                    for node_name, node_update in chunk.items():
-                        if not node_name.startswith('__'):
-                            final_state.update(node_update)
+                    final_state = merge_stream_chunk(final_state, chunk)
 
         # 记录最后一个节点的时间
         if current_node_name and current_node_start:

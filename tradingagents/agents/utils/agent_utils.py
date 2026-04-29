@@ -610,6 +610,17 @@ class Toolkit:
             return f"错误：{ticker} 不是有效的中国A股代码格式"
 
         try:
+            try:
+                from tradingagents.dataflows.providers.china.integrated import get_integrated_china_provider
+
+                integrated_report = get_integrated_china_provider().get_fundamentals_data(ticker)
+                if integrated_report and "❌" not in integrated_report:
+                    logger.info(f"✅ [A股基本面] 使用东方财富统一财务数据源: {ticker}")
+                    return integrated_report
+                logger.warning(f"⚠️ [A股基本面] 东方财富统一财务数据源质量异常，回退旧链路: {integrated_report[:200] if integrated_report else 'empty'}")
+            except Exception as integrated_error:
+                logger.warning(f"⚠️ [A股基本面] 东方财富统一财务数据源失败，回退旧链路: {integrated_error}")
+
             # 使用统一数据源接口获取股票数据（默认Tushare，支持备用数据源）
             from tradingagents.dataflows.interface import get_china_stock_data_unified
             logger.debug(f"📊 [DEBUG] 正在获取 {ticker} 的股票数据...")
@@ -855,6 +866,31 @@ class Toolkit:
                 logger.info(f"🇨🇳 [统一基本面工具] 处理A股数据，数据深度: {data_depth}...")
                 logger.info(f"🔍 [股票代码追踪] 进入A股处理分支，ticker: '{ticker}'")
                 logger.info(f"💡 [优化策略] 基本面分析只获取当前价格和财务数据，不获取历史日线数据")
+
+                try:
+                    from tradingagents.dataflows.providers.china.integrated import get_integrated_china_provider
+
+                    integrated_fundamentals = get_integrated_china_provider().get_fundamentals_data(ticker)
+                    if integrated_fundamentals and "❌" not in integrated_fundamentals:
+                        result_data.append(f"## A股东方财富财务数据\n{integrated_fundamentals}")
+                        logger.info(f"✅ [统一基本面工具] A股东方财富财务数据获取成功")
+                        combined_result = f"""# {ticker} 基本面分析数据
+
+**股票类型**: {market_info['market_name']}
+**货币**: {market_info['currency_name']} ({market_info['currency_symbol']})
+**分析日期**: {curr_date}
+**数据深度级别**: {data_depth}
+
+{chr(10).join(result_data)}
+
+---
+*数据来源: 东方财富公开财务接口 + 统一A股数据源*
+"""
+                        return combined_result
+                    else:
+                        logger.warning(f"⚠️ [统一基本面工具] A股东方财富财务数据质量异常: {integrated_fundamentals[:200] if integrated_fundamentals else 'empty'}")
+                except Exception as e:
+                    logger.error(f"❌ [基本面工具调试] A股东方财富财务数据获取失败: {e}")
 
                 # 优化策略：基本面分析不需要大量历史日线数据
                 # 只获取当前股价信息（最近1-2天即可）和基本面财务数据

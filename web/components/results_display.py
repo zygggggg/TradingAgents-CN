@@ -376,6 +376,12 @@ def render_detailed_analysis(state):
             'description': '财务数据、估值水平、盈利能力分析'
         },
         {
+            'key': 'quant_report',
+            'title': '📊 量化评分',
+            'icon': '📊',
+            'description': '多因子评分、仓位约束与风险提示'
+        },
+        {
             'key': 'sentiment_report',
             'title': '💭 市场情绪分析',
             'icon': '💭',

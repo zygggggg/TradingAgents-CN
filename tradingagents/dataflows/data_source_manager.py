@@ -5,6 +5,7 @@
 """
 
 import os
+import re
 import time
 from typing import Dict, List, Optional, Any
 from enum import Enum
@@ -1061,6 +1062,18 @@ class DataSourceManager:
         start_time = time.time()
 
         try:
+            if self._use_integrated_china_provider(symbol):
+                try:
+                    from .providers.china.integrated import get_integrated_china_stock_data
+
+                    integrated_result = get_integrated_china_stock_data(symbol, start_date, end_date, period)
+                    if integrated_result and "❌" not in integrated_result and "错误" not in integrated_result:
+                        logger.info(f"✅ [A股统一数据源] 成功获取{period}数据: {symbol}")
+                        return integrated_result
+                    logger.warning(f"⚠️ [A股统一数据源] 数据获取失败，降级到旧数据链路: {symbol}")
+                except Exception as integrated_error:
+                    logger.warning(f"⚠️ [A股统一数据源] 异常，降级到旧数据链路: {integrated_error}")
+
             # 根据数据源调用相应的获取方法
             actual_source = None  # 实际使用的数据源
 
@@ -1139,6 +1152,12 @@ class DataSourceManager:
                             'event_type': 'data_fetch_exception'
                         }, exc_info=True)
             return self._try_fallback_sources(symbol, start_date, end_date)
+
+    def _use_integrated_china_provider(self, symbol: str) -> bool:
+        """Return True when the new A-share provider chain should be used."""
+        if os.getenv("CHINA_MARKET_DATA_USE_INTEGRATED", "true").lower() not in {"1", "true", "yes", "on"}:
+            return False
+        return bool(re.match(r"^\d{6}$", str(symbol).strip()))
 
     def _get_mongodb_data(self, symbol: str, start_date: str, end_date: str, period: str = "daily") -> tuple[str, str | None]:
         """
@@ -1428,6 +1447,18 @@ class DataSourceManager:
         优先级：MongoDB → Tushare → AKShare → BaoStock
         """
         logger.info(f"📊 [数据来源: {self.current_source.value}] 开始获取股票信息: {symbol}")
+
+        if self._use_integrated_china_provider(symbol):
+            try:
+                from .providers.china.integrated import get_integrated_china_stock_info, is_valid_stock_info
+
+                integrated_info = get_integrated_china_stock_info(symbol)
+                if is_valid_stock_info(integrated_info, str(symbol).strip()):
+                    logger.info(f"✅ [A股统一数据源] 成功获取股票信息: {symbol}")
+                    return integrated_info
+                logger.warning(f"⚠️ [A股统一数据源] 股票信息无效，降级到旧数据链路: {symbol}")
+            except Exception as integrated_error:
+                logger.warning(f"⚠️ [A股统一数据源] 股票信息异常，降级到旧数据链路: {integrated_error}")
 
         # 优先使用 App Mongo 缓存（当 ta_use_app_cache=True）
         try:

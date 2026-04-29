@@ -7,10 +7,12 @@ import os
 import logging
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
 
 # 添加项目根目录到Python路径
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
+load_dotenv(project_root / ".env", override=True)
 
 from web.utils.persistence import load_model_selection, save_model_selection
 from web.utils.auth_manager import auth_manager
@@ -197,15 +199,19 @@ def render_sidebar():
         # 从持久化存储加载配置
         saved_config = load_model_selection()
 
-        # 初始化session state，优先使用保存的配置
+        default_provider = os.getenv("TA_LLM_PROVIDER", saved_config['provider'])
+        default_category = os.getenv("TA_MODEL_CATEGORY", saved_config['category'])
+        default_model = os.getenv("TA_LLM_MODEL", saved_config['model'])
+
+        # 初始化session state，优先使用环境变量，其次使用保存的配置
         if 'llm_provider' not in st.session_state:
-            st.session_state.llm_provider = saved_config['provider']
+            st.session_state.llm_provider = default_provider
             logger.debug(f"🔧 [Persistence] 恢复 llm_provider: {st.session_state.llm_provider}")
         if 'model_category' not in st.session_state:
-            st.session_state.model_category = saved_config['category']
+            st.session_state.model_category = default_category
             logger.debug(f"🔧 [Persistence] 恢复 model_category: {st.session_state.model_category}")
         if 'llm_model' not in st.session_state:
-            st.session_state.llm_model = saved_config['model']
+            st.session_state.llm_model = default_model
             logger.debug(f"🔧 [Persistence] 恢复 llm_model: {st.session_state.llm_model}")
 
         # 显示当前session state状态（调试用）
@@ -481,7 +487,7 @@ def render_sidebar():
             
             # 初始化session state
             if 'custom_openai_base_url' not in st.session_state:
-                st.session_state.custom_openai_base_url = "https://api.openai.com/v1"
+                st.session_state.custom_openai_base_url = os.getenv("CUSTOM_OPENAI_BASE_URL", "https://api.openai.com/v1")
             if 'custom_openai_api_key' not in st.session_state:
                 st.session_state.custom_openai_api_key = ""
             
@@ -512,6 +518,7 @@ def render_sidebar():
             
             # 模型选择
             custom_openai_options = [
+                os.getenv("TA_LLM_MODEL", "gpt-5.5"),
                 "gpt-4o",
                 "gpt-4o-mini", 
                 "gpt-4-turbo",
@@ -528,6 +535,7 @@ def render_sidebar():
                 "llama-3.1-405b",
                 "custom-model"
             ]
+            custom_openai_options = list(dict.fromkeys(custom_openai_options))
             
             # 获取当前选择的索引
             current_index = 0
@@ -554,7 +562,7 @@ def render_sidebar():
                     "llama-3.1-70b": "Llama 3.1 70B - 大型开源",
                     "llama-3.1-405b": "Llama 3.1 405B - 超大开源",
                     "custom-model": "自定义模型名称"
-                }[x],
+                }.get(x, f"自定义模型 - {x}"),
                 help="选择要使用的模型，支持各种OpenAI兼容的模型",
                 key="custom_openai_model_select"
             )

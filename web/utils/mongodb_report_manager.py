@@ -30,8 +30,11 @@ class MongoDBReportManager:
         self.collection = None
         self.connected = False
         
-        if MONGODB_AVAILABLE:
+        mongodb_enabled = os.getenv("MONGODB_ENABLED", "false").lower() == "true" or os.getenv("USE_MONGODB_STORAGE", "false").lower() == "true"
+        if MONGODB_AVAILABLE and mongodb_enabled:
             self._connect()
+        else:
+            logger.info("ℹ️ MongoDB报告存储未启用，跳过连接")
     
     def _connect(self):
         """连接到MongoDB"""
