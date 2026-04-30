@@ -895,45 +895,21 @@ class Toolkit:
                 except Exception as e:
                     logger.error(f"❌ [基本面工具调试] A股东方财富财务数据获取失败: {e}")
 
-                # 优化策略：基本面分析不需要大量历史日线数据
-                # 只获取当前股价信息（最近1-2天即可）和基本面财务数据
-                try:
-                    # 获取最新股价信息（只需要最近1-2天的数据）
-                    from datetime import datetime, timedelta
-                    recent_end_date = curr_date
-                    recent_start_date = (datetime.strptime(curr_date, '%Y-%m-%d') - timedelta(days=2)).strftime('%Y-%m-%d')
+                # 东方财富直连未达标时，不再调用旧的 OptimizedChinaDataProvider 简化版。
+                # 直接走质量门禁的重取链路：实时行情价格 + 可选Mongo缓存 + AKShare财务兜底。
+                from tradingagents.dataflows.fundamentals_quality import ensure_fundamentals_quality
 
-                    from tradingagents.dataflows.interface import get_china_stock_data_unified
-                    logger.info(f"🔍 [股票代码追踪] 调用 get_china_stock_data_unified（仅获取最新价格），传入参数: ticker='{ticker}', start_date='{recent_start_date}', end_date='{recent_end_date}'")
-                    current_price_data = get_china_stock_data_unified(ticker, recent_start_date, recent_end_date)
+                combined_result = f"""# {ticker} 基本面分析数据
 
-                    # 🔍 调试：打印返回数据的前500字符
-                    logger.info(f"🔍 [基本面工具调试] A股价格数据返回长度: {len(current_price_data)}")
-                    logger.info(f"🔍 [基本面工具调试] A股价格数据前500字符:\n{current_price_data[:500]}")
+**股票类型**: {market_info['market_name']}
+**货币**: {market_info['currency_name']} ({market_info['currency_symbol']})
+**分析日期**: {curr_date}
+**数据深度级别**: {data_depth}
 
-                    result_data.append(f"## A股当前价格信息\n{current_price_data}")
-                except Exception as e:
-                    logger.error(f"❌ [基本面工具调试] A股价格数据获取失败: {e}")
-                    result_data.append(f"## A股当前价格信息\n获取失败: {e}")
-                    current_price_data = ""
-
-                try:
-                    # 获取基本面财务数据（这是基本面分析的核心）
-                    from tradingagents.dataflows.optimized_china_data import OptimizedChinaDataProvider
-                    analyzer = OptimizedChinaDataProvider()
-                    logger.info(f"🔍 [股票代码追踪] 调用 OptimizedChinaDataProvider._generate_fundamentals_report，传入参数: ticker='{ticker}', analysis_modules='{analysis_modules}'")
-
-                    # 传递分析模块参数到基本面分析方法
-                    fundamentals_data = analyzer._generate_fundamentals_report(ticker, current_price_data, analysis_modules)
-
-                    # 🔍 调试：打印返回数据的前500字符
-                    logger.info(f"🔍 [基本面工具调试] A股基本面数据返回长度: {len(fundamentals_data)}")
-                    logger.info(f"🔍 [基本面工具调试] A股基本面数据前500字符:\n{fundamentals_data[:500]}")
-
-                    result_data.append(f"## A股基本面财务数据\n{fundamentals_data}")
-                except Exception as e:
-                    logger.error(f"❌ [基本面工具调试] A股基本面数据获取失败: {e}")
-                    result_data.append(f"## A股基本面财务数据\n获取失败: {e}")
+"""
+                combined_result, quality = ensure_fundamentals_quality(ticker, combined_result)
+                logger.info(f"✅ [统一基本面工具] A股财务质量门禁重取通过: {quality}")
+                return combined_result
 
             elif is_hk:
                 # 港股：使用AKShare数据源，支持多重备用方案
