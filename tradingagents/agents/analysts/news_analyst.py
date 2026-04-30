@@ -1,5 +1,6 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 import time
+import os
 import json
 from datetime import datetime
 
@@ -33,11 +34,11 @@ def create_news_analyst(llm, toolkit):
         logger.info(f"[新闻分析师] 开始分析 {ticker} 的新闻，交易日期: {current_date}")
         session_id = state.get("session_id", "未知会话")
         logger.info(f"[新闻分析师] 会话ID: {session_id}，开始时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        
+
         # 获取市场信息
         market_info = StockUtils.get_market_info(ticker)
         logger.info(f"[新闻分析师] 股票类型: {market_info['market_name']}")
-        
+
         # 获取公司名称
         def _get_company_name(ticker: str, market_info: dict) -> str:
             """根据股票代码获取公司名称"""
@@ -46,7 +47,7 @@ def create_news_analyst(llm, toolkit):
                     # 中国A股：使用统一接口获取股票信息
                     from tradingagents.dataflows.interface import get_china_stock_info_unified
                     stock_info = get_china_stock_info_unified(ticker)
-                    
+
                     # 解析股票名称
                     if "股票名称:" in stock_info:
                         company_name = stock_info.split("股票名称:")[1].split("\n")[0].strip()
@@ -55,7 +56,7 @@ def create_news_analyst(llm, toolkit):
                     else:
                         logger.warning(f"⚠️ [DEBUG] 无法从统一接口解析股票名称: {ticker}")
                         return f"股票代码{ticker}"
-                        
+
                 elif market_info['is_hk']:
                     # 港股：使用改进的港股工具
                     try:
@@ -68,7 +69,7 @@ def create_news_analyst(llm, toolkit):
                         # 降级方案：生成友好的默认名称
                         clean_ticker = ticker.replace('.HK', '').replace('.hk', '')
                         return f"港股{clean_ticker}"
-                        
+
                 elif market_info['is_us']:
                     # 美股：使用简单映射或返回代码
                     us_stock_names = {
@@ -81,28 +82,28 @@ def create_news_analyst(llm, toolkit):
                         'META': 'Meta',
                         'NFLX': '奈飞'
                     }
-                    
+
                     company_name = us_stock_names.get(ticker.upper(), f"美股{ticker}")
                     logger.debug(f"📊 [DEBUG] 美股名称映射: {ticker} -> {company_name}")
                     return company_name
-                    
+
                 else:
                     return f"股票{ticker}"
-                    
+
             except Exception as e:
                 logger.error(f"❌ [DEBUG] 获取公司名称失败: {e}")
                 return f"股票{ticker}"
-        
+
         company_name = _get_company_name(ticker, market_info)
         instrument_context = build_instrument_context(ticker)
         logger.info(f"[新闻分析师] 公司名称: {company_name}")
-        
+
         # 🔧 使用统一新闻工具，简化工具调用
         logger.info(f"[新闻分析师] 使用统一新闻工具，自动识别股票类型并获取相应新闻")
    # 创建统一新闻工具
         unified_news_tool = create_unified_news_tool(toolkit)
         unified_news_tool.name = "get_stock_news_unified"
-        
+
         tools = [unified_news_tool]
         logger.info(f"[新闻分析师] 已加载统一新闻工具: get_stock_news_unified")
 
@@ -190,7 +191,7 @@ def create_news_analyst(llm, toolkit):
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(ticker=ticker)
         prompt = prompt.partial(instrument_context=instrument_context)
-        
+
         # 获取模型信息用于统一新闻工具的特殊处理
         model_info = ""
         try:
@@ -200,12 +201,13 @@ def create_news_analyst(llm, toolkit):
                 model_info = llm.__class__.__name__
         except:
             model_info = "Unknown"
-        
+
         logger.info(f"[新闻分析师] 准备调用LLM进行新闻分析，模型: {model_info}")
-        
+
         # 🚨 DashScope/DeepSeek/Zhipu预处理：强制获取新闻数据
         pre_fetched_news = None
-        if ('DashScope' in llm.__class__.__name__ 
+        if (os.getenv("NEWS_ANALYST_PREFETCH_ALL", "true").lower() in {"1", "true", "yes", "on"}
+            or 'DashScope' in llm.__class__.__name__
             or 'DeepSeek' in llm.__class__.__name__
             or 'Zhipu' in llm.__class__.__name__
             ):
@@ -294,14 +296,14 @@ def create_news_analyst(llm, toolkit):
                 logger.error(f"[新闻分析师] ❌ 预处理失败: {e}，回退到标准模式")
                 import traceback
                 logger.error(f"[新闻分析师] 📋 异常堆栈: {traceback.format_exc()}")
-        
+
         # 使用统一的Google工具调用处理器
         llm_start_time = datetime.now()
         chain = prompt | llm.bind_tools(tools)
         logger.info(f"[新闻分析师] 开始LLM调用，分析 {ticker} 的新闻")
         # 修复：传递字典而不是直接传递消息列表，以便 ChatPromptTemplate 能正确处理所有变量
         result = chain.invoke({"messages": state["messages"]})
-        
+
         llm_end_time = datetime.now()
         llm_time_taken = (llm_end_time - llm_start_time).total_seconds()
         logger.info(f"[新闻分析师] LLM调用完成，耗时: {llm_time_taken:.2f}秒")
@@ -309,7 +311,7 @@ def create_news_analyst(llm, toolkit):
         # 使用统一的Google工具调用处理器
         if GoogleToolCallHandler.is_google_model(llm):
             logger.info(f"📊 [新闻分析师] 检测到Google模型，使用统一工具调用处理器")
-            
+
             # 创建分析提示词
             analysis_prompt_template = GoogleToolCallHandler.create_analysis_prompt(
                 ticker=ticker,
@@ -317,7 +319,7 @@ def create_news_analyst(llm, toolkit):
                 analyst_type="新闻分析",
                 specific_requirements="重点关注新闻事件对股价的影响、市场情绪变化、政策影响等。"
             )
-            
+
             # 处理Google模型工具调用
             report, messages = GoogleToolCallHandler.handle_google_tool_calls(
                 result=result,
@@ -390,9 +392,13 @@ def create_news_analyst(llm, toolkit):
                     logger.error(f"[新闻分析师] 📋 异常堆栈: {traceback.format_exc()}")
                     report = result.content if hasattr(result, 'content') else ""
             else:
-                # 有工具调用，直接使用结果
-                report = result.content
-        
+                # 有工具调用时必须把 AIMessage 原样返回，让图执行工具；不能把空 content 当成新闻报告。
+                logger.info(f"[新闻分析师] 检测到工具调用，返回工具调用消息等待 ToolNode 执行")
+                return {
+                    "messages": [result],
+                    "news_tool_call_count": tool_call_count
+                }
+
         total_time_taken = (datetime.now() - start_time).total_seconds()
         logger.info(f"[新闻分析师] 新闻分析完成，总耗时: {total_time_taken:.2f}秒")
 

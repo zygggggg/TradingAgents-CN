@@ -493,14 +493,9 @@ def create_fundamentals_analyst(llm, toolkit):
                     }
 
                 elif tool_call_count >= max_tool_calls:
-                    # 达到最大调用次数，但还没有工具结果（不应该发生）
-                    logger.warning(f"🔧 [异常情况] 达到最大工具调用次数 {max_tool_calls}，但没有工具结果")
-                    fallback_report = f"基本面分析（股票代码：{ticker}）\n\n由于达到最大工具调用次数限制，使用简化分析模式。建议检查数据源连接或降低分析复杂度。"
-                    return {
-                        "messages": [result],
-                        "fundamentals_report": fallback_report,
-                        "fundamentals_tool_call_count": tool_call_count
-                    }
+                    # 达到最大调用次数但仍没有工具结果时，不能生成简化基本面报告。
+                    logger.error(f"🔧 [异常情况] 达到最大工具调用次数 {max_tool_calls}，但没有工具结果，已中止")
+                    raise RuntimeError("基本面工具未返回有效财务数据，禁止生成简化版基本面报告。")
                 else:
                     # 第一次调用工具，正常流程
                     logger.info(f"✅ [正常流程] ===== LLM第一次调用工具 =====")
@@ -635,9 +630,19 @@ def create_fundamentals_analyst(llm, toolkit):
                         combined_data = "统一基本面分析工具不可用"
                         logger.debug(f"📊 [DEBUG] 统一工具未找到")
                 except Exception as e:
-                    combined_data = f"统一基本面分析工具调用失败: {e}"
-                    logger.debug(f"📊 [DEBUG] 统一工具调用异常: {e}")
-                
+                    logger.error(f"📊 [DEBUG] 统一工具调用异常: {e}")
+                    raise RuntimeError(f"统一基本面分析工具调用失败，禁止生成简化版基本面报告: {e}")
+
+                if not combined_data or "工具调用失败" in str(combined_data) or "工具不可用" in str(combined_data):
+                    raise RuntimeError("统一基本面分析工具未返回有效数据，禁止生成简化版基本面报告。")
+                try:
+                    from tradingagents.dataflows.fundamentals_quality import ensure_fundamentals_quality
+
+                    combined_data, _fundamentals_quality = ensure_fundamentals_quality(ticker, str(combined_data))
+                    logger.info(f"📊 [基本面分析师] 强制工具数据质量门禁通过: {_fundamentals_quality}")
+                except Exception as e:
+                    raise RuntimeError(f"基本面工具数据质量门禁未通过，禁止生成报告: {e}")
+
                 currency_info = f"{market_info['currency_name']}（{market_info['currency_symbol']}）"
                 
                 # 生成基于真实数据的分析报告
@@ -678,7 +683,15 @@ def create_fundamentals_analyst(llm, toolkit):
 
                 except Exception as e:
                     logger.error(f"❌ [DEBUG] 强制工具调用分析失败: {e}")
-                    report = f"基本面分析失败：{str(e)}"
+                    raise RuntimeError(f"基本面分析生成失败，禁止写入失败模板: {e}")
+
+                try:
+                    from tradingagents.dataflows.fundamentals_quality import ensure_fundamentals_quality
+
+                    report, _report_quality = ensure_fundamentals_quality(ticker, str(report))
+                    logger.info(f"📊 [基本面分析师] 生成报告质量门禁通过: {_report_quality}")
+                except Exception as e:
+                    raise RuntimeError(f"基本面分析报告质量门禁未通过，禁止继续: {e}")
 
                 # 🔧 保持工具调用计数器不变（已在开始时根据ToolMessage更新）
                 return {

@@ -886,6 +886,9 @@ class Toolkit:
 ---
 *数据来源: 东方财富公开财务接口 + 统一A股数据源*
 """
+                        from tradingagents.dataflows.fundamentals_quality import ensure_fundamentals_quality
+                        combined_result, quality = ensure_fundamentals_quality(ticker, combined_result)
+                        logger.info(f"✅ [统一基本面工具] A股财务质量门禁通过: {quality}")
                         return combined_result
                     else:
                         logger.warning(f"⚠️ [统一基本面工具] A股东方财富财务数据质量异常: {integrated_fundamentals[:200] if integrated_fundamentals else 'empty'}")
@@ -1067,11 +1070,18 @@ class Toolkit:
             
             logger.info(f"📊 [统一基本面工具] ===== 数据获取摘要结束 =====")
             
+            if is_china:
+                from tradingagents.dataflows.fundamentals_quality import ensure_fundamentals_quality
+                combined_result, quality = ensure_fundamentals_quality(ticker, combined_result)
+                logger.info(f"✅ [统一基本面工具] A股财务质量门禁通过: {quality}")
+
             return combined_result
 
         except Exception as e:
             error_msg = f"统一基本面分析工具执行失败: {str(e)}"
             logger.error(f"❌ [统一基本面工具] {error_msg}")
+            if locals().get("is_china"):
+                raise RuntimeError(error_msg)
             return error_msg
 
     @staticmethod

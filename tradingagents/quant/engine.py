@@ -84,15 +84,9 @@ def generate_quant_report(
         if history_df.empty:
             raise RuntimeError("未获取到可用历史行情")
 
-        fundamentals_text = fundamentals_report or ""
-        try:
-            provider_fundamentals = provider.get_fundamentals_data(stock_symbol, report_count=5)
-            if provider_fundamentals and not provider_fundamentals.startswith("❌"):
-                fundamentals_text = (fundamentals_text + "\n\n" + provider_fundamentals).strip()
-            elif not fundamentals_text:
-                fundamentals_text = provider_fundamentals
-        except Exception as fundamentals_error:
-            logger.debug("量化评分财务数据补充失败: %s %s", stock_symbol, fundamentals_error)
+        fundamentals_text = fundamentals_report
+        if not fundamentals_text:
+            fundamentals_text = provider.get_fundamentals_data(stock_symbol, report_count=5)
 
         info = provider.get_stock_info(stock_symbol)
         result = _score_stock(
@@ -300,100 +294,28 @@ def _extract_fundamental_metrics(text: str) -> Dict[str, Any]:
         return metrics
 
     patterns = {
-        "revenue_yoy": [
-            r"营业总收入.*?同比(?:增长|变化)?[:：]?\s*([+-]?\d+(?:\.\d+)?)%",
-            r"营业收入同比增长[:：]?\s*([+-]?\d+(?:\.\d+)?)%",
-        ],
-        "profit_yoy": [
-            r"归母净利润.*?同比(?:增长|变化)?[:：]?\s*([+-]?\d+(?:\.\d+)?)%",
-            r"归母净利润同比增长[:：]?\s*([+-]?\d+(?:\.\d+)?)%",
-        ],
-        "deducted_profit_yoy": [
-            r"扣非归母净利润.*?同比(?:增长|变化)?[:：]?\s*([+-]?\d+(?:\.\d+)?)%",
-            r"扣非归母净利润同比增长[:：]?\s*([+-]?\d+(?:\.\d+)?)%",
-        ],
-        "roe": [r"ROE[:：]?\s*([+-]?\d+(?:\.\d+)?)%"],
-        "gross_margin": [r"毛利率[:：]?\s*([+-]?\d+(?:\.\d+)?)%", r"\|\s*毛利率\s*\|.*?\n.*?\|.*?\|\s*([+-]?\d+(?:\.\d+)?)%"],
-        "net_margin": [r"毛利率.*?净利率[:：]?\s*([+-]?\d+(?:\.\d+)?)%", r"净利率[:：]?\s*([+-]?\d+(?:\.\d+)?)%"],
-        "debt_ratio": [r"资产负债率[:：]?\s*([+-]?\d+(?:\.\d+)?)%"],
-        "current_ratio": [r"流动比率[:：]?\s*([+-]?\d+(?:\.\d+)?)(?:x|倍)"],
-        "quick_ratio": [r"速动比率[:：]?\s*([+-]?\d+(?:\.\d+)?)(?:x|倍)"],
-        "pe_simple": [r"简单PE.*?[:：]\s*([+-]?\d+(?:\.\d+)?)(?:x|倍)", r"简单PE[:：]?\s*([+-]?\d+(?:\.\d+)?)(?:x|倍)?"],
-        "pb_simple": [r"简单PB.*?[:：]\s*([+-]?\d+(?:\.\d+)?)(?:x|倍)", r"PB[:：]\s*([+-]?\d+(?:\.\d+)?)(?:x|倍)?"],
-        "ps_simple": [r"简单PS.*?[:：]\s*([+-]?\d+(?:\.\d+)?)(?:x|倍)", r"PS[:：]\s*([+-]?\d+(?:\.\d+)?)(?:x|倍)?"],
+        "revenue_yoy": r"营业总收入:.*?同比:\s*([+-]?\d+(?:\.\d+)?)%",
+        "profit_yoy": r"归母净利润:.*?同比:\s*([+-]?\d+(?:\.\d+)?)%",
+        "deducted_profit_yoy": r"扣非归母净利润:.*?同比:\s*([+-]?\d+(?:\.\d+)?)%",
+        "roe": r"(?:ROE|净资产收益率)[^\n\d\-]{0,40}([+-]?\d+(?:\.\d+)?)%",
+        "gross_margin": r"毛利率[^\n\d\-]{0,40}([+-]?\d+(?:\.\d+)?)%",
+        "net_margin": r"净利率[^\n\d\-]{0,40}([+-]?\d+(?:\.\d+)?)%",
+        "debt_ratio": r"资产负债率[^\n\d\-]{0,40}([+-]?\d+(?:\.\d+)?)%",
+        "current_ratio": r"流动比率:\s*([+-]?\d+(?:\.\d+)?)x",
+        "quick_ratio": r"速动比率:\s*([+-]?\d+(?:\.\d+)?)x",
+        "pe_simple": r"(?:简单PE|PE\s*/?市盈率|市盈率\s*PE|PE)[^\n\d\-]{0,40}([+-]?\d+(?:\.\d+)?)\s*(?:x|倍)?",
+        "pb_simple": r"(?:简单PB|PB\s*/?市净率|市净率\s*PB|PB)[^\n\d\-]{0,40}([+-]?\d+(?:\.\d+)?)\s*(?:x|倍)?",
+        "ps_simple": r"(?:简单PS|PS\s*/?市销率|市销率\s*PS|PS)[^\n\d\-]{0,40}([+-]?\d+(?:\.\d+)?)\s*(?:x|倍)?",
     }
-    table_metrics = _extract_metrics_from_tables(text)
-    metrics.update(table_metrics)
-
-    for key, pattern_list in patterns.items():
-        if key in metrics:
-            continue
-        value = _first_regex_float(pattern_list, text)
+    for key, pattern in patterns.items():
+        value = _regex_float(pattern, text)
         if value is not None:
             metrics[key] = value
 
     operating_cash_flow = _extract_latest_table_value(text, "现金流量表摘要", "经营现金流净额")
-    if operating_cash_flow is None:
-        operating_cash_flow = _first_money_value(
-            [
-                r"经营现金流净额[^\n|]*?([+-]?[¥￥]?\d+(?:\.\d+)?\s*(?:亿|万)?元?)",
-                r"经营现金流净额\s*\|\s*([+-]?[¥￥]?\d+(?:\.\d+)?\s*(?:亿|万)?元?)",
-            ],
-            text,
-        )
     if operating_cash_flow is not None:
         metrics["operating_cash_flow"] = operating_cash_flow
     return metrics
-
-
-def _extract_metrics_from_tables(text: str) -> Dict[str, Any]:
-    metrics: Dict[str, Any] = {}
-    row_map = {
-        "营业总收入": "revenue_yoy",
-        "营业收入": "revenue_yoy",
-        "归母净利润": "profit_yoy",
-        "扣非归母净利润": "deducted_profit_yoy",
-        "毛利率": "gross_margin",
-        "净利率": "net_margin",
-        "ROE": "roe",
-        "资产负债率": "debt_ratio",
-        "流动比率": "current_ratio",
-        "速动比率": "quick_ratio",
-    }
-    for raw_line in text.splitlines():
-        if "|" not in raw_line:
-            continue
-        cells = [cell.strip().strip("*") for cell in raw_line.strip().strip("|").split("|")]
-        if len(cells) < 2:
-            continue
-        label = cells[0]
-        for keyword, metric_key in row_map.items():
-            if keyword not in label:
-                continue
-            if metric_key.endswith("_yoy") and len(cells) >= 3:
-                value = _extract_percent(cells[-1])
-            elif metric_key in {"current_ratio", "quick_ratio"}:
-                value = _extract_float(cells[1])
-            else:
-                value = _extract_percent(cells[1])
-            if value is not None:
-                metrics[metric_key] = value
-            break
-    return metrics
-
-
-def _extract_percent(value: str) -> Optional[float]:
-    match = re.search(r"([+-]?\d+(?:\.\d+)?)\s*%", value)
-    if not match:
-        return None
-    return float(match.group(1))
-
-
-def _extract_float(value: str) -> Optional[float]:
-    match = re.search(r"([+-]?\d+(?:\.\d+)?)", value)
-    if not match:
-        return None
-    return float(match.group(1))
 
 
 def _regex_float(pattern: str, text: str) -> Optional[float]:
@@ -404,25 +326,6 @@ def _regex_float(pattern: str, text: str) -> Optional[float]:
         return float(match.group(1))
     except Exception:
         return None
-
-
-def _first_regex_float(patterns: List[str], text: str) -> Optional[float]:
-    for pattern in patterns:
-        value = _regex_float(pattern, text)
-        if value is not None:
-            return value
-    return None
-
-
-def _first_money_value(patterns: List[str], text: str) -> Optional[float]:
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.S)
-        if not match:
-            continue
-        value = _parse_chinese_money(match.group(1))
-        if value is not None:
-            return value
-    return None
 
 
 def _extract_latest_table_value(text: str, section_title: str, column_name: str) -> Optional[float]:
@@ -444,7 +347,7 @@ def _extract_latest_table_value(text: str, section_title: str, column_name: str)
 
 
 def _parse_chinese_money(value: str) -> Optional[float]:
-    value = value.strip().replace(",", "").replace("¥", "").replace("￥", "").replace("元", "")
+    value = value.strip().replace(",", "")
     if not value or value.upper() == "N/A":
         return None
     match = re.search(r"([+-]?\d+(?:\.\d+)?)(亿|万)?", value)

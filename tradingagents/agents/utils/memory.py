@@ -5,7 +5,6 @@ import dashscope
 from dashscope import TextEmbedding
 import os
 import threading
-import hashlib
 from typing import Dict, Optional
 
 # 导入统一日志系统
@@ -51,19 +50,20 @@ class ChromaDBManager:
                 self._initialized = True
             except Exception as e:
                 logger.error(f"❌ [ChromaDB] 初始化失败: {e}")
-                # 使用最简单的配置作为备用
+                if os.getenv('MEMORY_CHROMA_PERSIST', 'true').lower() == 'true':
+                    raise RuntimeError(f"ChromaDB持久化初始化失败，禁止静默降级到内存库: {e}") from e
+                # 仅在明确关闭持久化时允许使用临时内存库
                 try:
                     settings = Settings(
                         allow_reset=True,
-                        anonymized_telemetry=False,  # 关键：禁用遥测
+                        anonymized_telemetry=False,
                         is_persistent=False
                     )
                     self._client = chromadb.Client(settings)
-                    logger.info(f"📚 [ChromaDB] 使用备用配置初始化完成")
+                    logger.info(f"📚 [ChromaDB] 使用临时内存配置初始化完成")
                 except Exception as backup_error:
-                    # 最后的备用方案
                     self._client = chromadb.Client()
-                    logger.warning(f"⚠️ [ChromaDB] 使用最简配置初始化: {backup_error}")
+                    logger.warning(f"⚠️ [ChromaDB] 使用最简临时配置初始化: {backup_error}")
                 self._initialized = True
 
     def get_or_create_collection(self, name: str):
@@ -295,20 +295,66 @@ class FinancialSituationMemory:
             self.embedding = "nomic-embed-text"
             self.client = OpenAI(base_url=config["backend_url"])
         else:
-            self.embedding = "text-embedding-3-small"
-            openai_key = os.getenv('OPENAI_API_KEY')
-            if openai_key:
-                self.client = OpenAI(
-                    api_key=openai_key,
-                    base_url=config["backend_url"]
-                )
+            memory_embedding_provider = os.getenv('MEMORY_EMBEDDING_PROVIDER', 'openai').lower()
+            if memory_embedding_provider == 'dashscope':
+                self.embedding = os.getenv('MEMORY_EMBEDDING_MODEL', 'text-embedding-v4')
+                dashscope_key = os.getenv('DASHSCOPE_API_KEY')
+                if dashscope_key:
+                    import dashscope
+                    dashscope.api_key = dashscope_key
+                    self.client = "DASHSCOPE"
+                    logger.info(f"💡 Memory使用DashScope真实嵌入服务: {self.embedding}")
+                else:
+                    self.client = "DISABLED"
+                    logger.error(f"❌ 未找到DASHSCOPE_API_KEY，DashScope Memory不可用")
             else:
-                self.client = "DISABLED"
-                logger.warning(f"⚠️ 未找到OPENAI_API_KEY，记忆功能已禁用")
+                self.embedding = os.getenv('MEMORY_EMBEDDING_MODEL', 'text-embedding-3-small')
+                openai_key = os.getenv('MEMORY_EMBEDDING_API_KEY') or os.getenv('OPENAI_API_KEY')
+                embedding_base_url = os.getenv('MEMORY_EMBEDDING_BASE_URL') or config["backend_url"]
+                if openai_key:
+                    self.client = OpenAI(
+                        api_key=openai_key,
+                        base_url=embedding_base_url
+                    )
+                    logger.info(f"💡 Memory使用OpenAI兼容真实嵌入服务: {self.embedding}")
+                else:
+                    self.client = "DISABLED"
+                    logger.warning(f"⚠️ 未找到OPENAI_API_KEY/MEMORY_EMBEDDING_API_KEY，记忆功能已禁用")
 
         # 使用单例ChromaDB管理器
         self.chroma_manager = ChromaDBManager()
         self.situation_collection = self.chroma_manager.get_or_create_collection(name)
+
+    def _memory_embedding_errors_are_fatal(self):
+        return (
+            os.getenv('MEMORY_STRICT_EMBEDDING', 'false').lower() == 'true'
+            and os.getenv('MEMORY_FATAL_ON_EMBEDDING_ERROR', 'false').lower() == 'true'
+        )
+
+    def _empty_embedding_or_raise(self, message):
+        if self._memory_embedding_errors_are_fatal():
+            raise RuntimeError(message)
+        logger.warning(f"⚠️ {message}，记忆检索降级为空向量，不中断报告生成")
+        return [0.0] * 1024
+
+    def _uses_dashscope_embedding(self):
+        return (
+            self.client == "DASHSCOPE"
+            or self.llm_provider in {"dashscope", "alibaba", "qianfan"}
+            or (self.llm_provider in {"google", "deepseek", "openrouter"} and self.client is None)
+        )
+
+    def _get_dashscope_safe_embedding_limit(self):
+        raw_limit = os.getenv('DASHSCOPE_EMBEDDING_MAX_CHARS') or os.getenv('MEMORY_DASHSCOPE_MAX_CHARS') or '7600'
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            logger.warning(f"⚠️ DashScope embedding长度配置无效: {raw_limit}，使用7600字符")
+            limit = 7600
+        if limit > 8192:
+            logger.warning(f"⚠️ DashScope embedding最大输入为8192，当前配置{limit}过大，使用7600字符")
+            limit = 7600
+        return max(1000, limit)
 
     def _smart_text_truncation(self, text, max_length=8192):
         """智能文本截断，保持语义完整性和缓存兼容性"""
@@ -353,19 +399,15 @@ class FinancialSituationMemory:
 
         # 检查记忆功能是否被禁用
         if self.client == "DISABLED":
-            # 内存功能已禁用，返回空向量
-            logger.debug(f"⚠️ 记忆功能已禁用，返回空向量")
-            return [0.0] * 1024  # 返回1024维的零向量
+            return self._empty_embedding_or_raise("记忆功能已禁用，无法生成真实向量")
 
         # 验证输入文本
         if not text or not isinstance(text, str):
-            logger.warning(f"⚠️ 输入文本为空或无效，返回空向量")
-            return [0.0] * 1024
+            return self._empty_embedding_or_raise("输入文本为空或无效，无法生成真实向量")
 
         text_length = len(text)
         if text_length == 0:
-            logger.warning(f"⚠️ 输入文本长度为0，返回空向量")
-            return [0.0] * 1024
+            return self._empty_embedding_or_raise("输入文本长度为0，无法生成真实向量")
         
         # 检查是否启用长度限制
         if self.enable_embedding_length_check and text_length > self.max_embedding_length:
@@ -380,23 +422,39 @@ class FinancialSituationMemory:
                 'strategy': 'length_limit_skip',
                 'max_length': self.max_embedding_length
             }
-            return [0.0] * 1024
+            return self._empty_embedding_or_raise(f"文本过长({text_length:,}字符 > {self.max_embedding_length:,}字符)，跳过向量化")
         
-        # 记录文本信息（不进行任何截断）
-        if text_length > 8192:
+        original_length = text_length
+        was_truncated = False
+        strategy = 'raw_embedding_input'
+
+        if self._uses_dashscope_embedding():
+            dashscope_safe_limit = self._get_dashscope_safe_embedding_limit()
+            if text_length > dashscope_safe_limit:
+                processed_text, was_truncated = self._smart_text_truncation(text, dashscope_safe_limit)
+                text = processed_text.strip()
+                if not text:
+                    return self._empty_embedding_or_raise("DashScope embedding预处理后文本为空")
+                text_length = len(text)
+                strategy = 'dashscope_safe_truncation'
+                logger.warning(
+                    f"⚠️ Memory文本过长({original_length}字符)，已压缩到{text_length}字符再送DashScope；"
+                    f"仅影响历史记忆检索，不截断用户报告正文"
+                )
+        elif text_length > 8192:
             logger.info(f"📝 处理长文本: {text_length}字符，提供商: {self.llm_provider}")
-        
-        # 存储文本处理信息
+
         self._last_text_info = {
-            'original_length': text_length,
-            'processed_length': text_length,  # 不截断，保持原长度
-            'was_truncated': False,  # 永不截断
+            'original_length': original_length,
+            'processed_length': text_length,
+            'was_truncated': was_truncated,
             'was_skipped': False,
             'provider': self.llm_provider,
-            'strategy': 'no_truncation_with_fallback'  # 标记策略
+            'strategy': strategy
         }
 
-        if (self.llm_provider == "dashscope" or
+        if (self.client == "DASHSCOPE" or
+            self.llm_provider == "dashscope" or
             self.llm_provider == "alibaba" or
             self.llm_provider == "qianfan" or
             (self.llm_provider == "google" and self.client is None) or
@@ -410,8 +468,7 @@ class FinancialSituationMemory:
 
                 # 检查DashScope API密钥是否可用
                 if not hasattr(dashscope, 'api_key') or not dashscope.api_key:
-                    logger.warning(f"⚠️ DashScope API密钥未设置，记忆功能降级")
-                    return [0.0] * 1024  # 返回空向量
+                    return self._empty_embedding_or_raise("DashScope API密钥未设置，无法生成真实向量")
 
                 # 尝试调用DashScope API
                 response = TextEmbedding.call(
@@ -446,14 +503,12 @@ class FinancialSituationMemory:
                                 return embedding
                             except Exception as fallback_error:
                                 logger.error(f"❌ OpenAI降级失败: {str(fallback_error)}")
-                                logger.info(f"💡 所有降级选项失败，记忆功能降级")
-                                return [0.0] * 1024
+                                return self._empty_embedding_or_raise(f"OpenAI降级失败，无法生成真实向量: {fallback_error}")
                         else:
-                            logger.info(f"💡 无可用降级选项，记忆功能降级")
-                            return [0.0] * 1024
+                            return self._empty_embedding_or_raise(f"DashScope长度限制且无可用降级选项: {error_msg}")
                     else:
                         logger.error(f"❌ DashScope API错误: {error_msg}")
-                        return [0.0] * 1024  # 返回空向量而不是抛出异常
+                        return self._empty_embedding_or_raise(f"DashScope API错误: {error_msg}")
 
             except Exception as e:
                 error_str = str(e).lower()
@@ -475,11 +530,9 @@ class FinancialSituationMemory:
                             return embedding
                         except Exception as fallback_error:
                             logger.error(f"❌ OpenAI降级失败: {str(fallback_error)}")
-                            logger.info(f"💡 所有降级选项失败，记忆功能降级")
-                            return [0.0] * 1024
+                            return self._empty_embedding_or_raise(f"OpenAI降级失败，无法生成真实向量: {fallback_error}")
                     else:
-                        logger.info(f"💡 无可用降级选项，记忆功能降级")
-                        return [0.0] * 1024
+                        return self._empty_embedding_or_raise(f"DashScope长度限制且无可用降级选项: {str(e)}")
                 elif 'import' in error_str:
                     logger.error(f"❌ DashScope包未安装: {str(e)}")
                 elif 'connection' in error_str:
@@ -489,17 +542,13 @@ class FinancialSituationMemory:
                 else:
                     logger.error(f"❌ DashScope embedding异常: {str(e)}")
                 
-                logger.warning(f"⚠️ 记忆功能降级，返回空向量")
-                return [0.0] * 1024
+                return self._empty_embedding_or_raise(f"{self.llm_provider} embedding失败: {str(e)}")
         else:
             # 使用OpenAI兼容的嵌入模型
             if self.client is None:
-                logger.warning(f"⚠️ 嵌入客户端未初始化，返回空向量")
-                return [0.0] * 1024  # 返回空向量
+                return self._empty_embedding_or_raise("嵌入客户端未初始化，无法生成真实向量")
             elif self.client == "DISABLED":
-                # 内存功能已禁用，返回空向量
-                logger.debug(f"⚠️ 内存功能已禁用，返回空向量")
-                return [0.0] * 1024  # 返回1024维的零向量
+                return self._empty_embedding_or_raise("记忆功能已禁用，无法生成真实向量")
 
             # 尝试调用OpenAI兼容的embedding API
             try:
@@ -539,8 +588,7 @@ class FinancialSituationMemory:
                     else:
                         logger.error(f"❌ {self.llm_provider} embedding异常: {str(e)}")
                 
-                logger.warning(f"⚠️ 记忆功能降级，返回空向量")
-                return [0.0] * 1024
+                return self._empty_embedding_or_raise(f"{self.llm_provider} embedding失败: {str(e)}")
 
     def get_embedding_config_status(self):
         """获取向量缓存配置状态"""
@@ -582,12 +630,21 @@ class FinancialSituationMemory:
     def get_memories(self, current_situation, n_matches=1):
         """Find matching recommendations using embeddings with smart truncation handling"""
         
-        # 获取当前情况的embedding
-        query_embedding = self.get_embedding(current_situation)
+        # 获取当前情况的embedding。Memory是辅助信息，不能因为向量服务异常中断报告生成。
+        try:
+            query_embedding = self.get_embedding(current_situation)
+        except Exception as e:
+            if self._memory_embedding_errors_are_fatal():
+                raise
+            logger.warning(f"⚠️ Memory embedding失败，跳过历史记忆检索，不中断报告生成: {str(e)}")
+            return []
         
         # 检查是否为空向量（记忆功能被禁用或出错）
         if all(x == 0.0 for x in query_embedding):
-            logger.debug(f"⚠️ 查询embedding为空向量，返回空结果")
+            message = "查询embedding为空向量，无法进行真实Memory检索"
+            if self._memory_embedding_errors_are_fatal():
+                raise RuntimeError(message)
+            logger.debug(f"⚠️ {message}，返回空结果；Memory不影响报告生成")
             return []
         
         # 检查是否有足够的数据进行查询
@@ -637,6 +694,8 @@ class FinancialSituationMemory:
             
         except Exception as e:
             logger.error(f"❌ 记忆查询失败: {str(e)}")
+            if os.getenv('MEMORY_STRICT_EMBEDDING', 'false').lower() == 'true':
+                raise RuntimeError(f"记忆查询失败，禁止静默返回空结果: {e}") from e
             return []
 
     def get_cache_info(self):

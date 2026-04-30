@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -114,15 +115,28 @@ class IntegratedChinaMarketDataProvider:
                     if payload.get("main_indicators"):
                         return format_fundamentals_report(symbol, payload)
                     errors.append("eastmoney: empty financial payload")
-                elif source in {"jqdata", "ricequant", "ifind"}:
-                    errors.append(f"{source}: 财务指标映射未配置")
+                elif source == "jqdata":
+                    result = self._jqdata_fundamentals(symbol, report_count)
+                    if result.ok and isinstance(result.data, str) and result.data.strip():
+                        return result.data
+                    errors.append(f"jqdata: {result.error or 'empty financial payload'}")
+                elif source == "ricequant":
+                    result = self._ricequant_fundamentals(symbol, report_count)
+                    if result.ok and isinstance(result.data, str) and result.data.strip():
+                        return result.data
+                    errors.append(f"ricequant: {result.error or 'empty financial payload'}")
+                elif source == "ifind":
+                    result = self._ifind_fundamentals(symbol, report_count)
+                    if result.ok and isinstance(result.data, str) and result.data.strip():
+                        return result.data
+                    errors.append(f"ifind: {result.error or 'empty financial payload'}")
             except Exception as exc:
                 logger.debug("A股基本面源 %s 获取失败: %s", source, exc)
                 errors.append(f"{source}: {exc}")
 
         return (
             f"❌ 所有A股统一基本面数据源都无法获取{symbol}的财务数据\n"
-            f"失败详情: {'; '.join(errors[-6:])}"
+            f"失败详情: {'; '.join(errors[-8:])}"
         )
 
     def _try_info_source(self, source: str, symbol: str) -> ProviderResult:
@@ -174,11 +188,26 @@ class IntegratedChinaMarketDataProvider:
         headers = dict(self.headers)
         if referer:
             headers["Referer"] = referer
-        response = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
-        response.raise_for_status()
-        if not response.text.strip():
-            raise RuntimeError("empty response")
-        return response
+        retries = max(1, int(os.getenv("CHINA_MARKET_DATA_RETRIES", "3")))
+        backoff = max(0.0, float(os.getenv("CHINA_MARKET_DATA_BACKOFF_SECONDS", "0.8")))
+        last_error: Optional[Exception] = None
+        for attempt in range(1, retries + 1):
+            try:
+                response = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
+                response.raise_for_status()
+                if not response.text.strip():
+                    raise RuntimeError("empty response")
+                return response
+            except requests.RequestException as exc:
+                last_error = exc
+            except RuntimeError as exc:
+                last_error = exc
+            if attempt < retries:
+                sleep_seconds = backoff * attempt
+                logger.debug("A股数据请求失败，准备重试 %s/%s: %s", attempt, retries, last_error)
+                if sleep_seconds:
+                    time.sleep(sleep_seconds)
+        raise RuntimeError(f"request failed after {retries} attempts: {last_error}")
 
     def _eastmoney_info(self, symbol: str) -> Dict:
         # The realtime push2 endpoint can be unstable on some networks.  The
@@ -524,6 +553,17 @@ class IntegratedChinaMarketDataProvider:
         if not os.getenv("IFIND_USERNAME") or not os.getenv("IFIND_PASSWORD"):
             return ProviderResult("ifind", False, error="IFIND_USERNAME/IFIND_PASSWORD未配置")
         return ProviderResult("ifind", False, error="iFinD SDK字段映射未配置，请按账号权限补充官方SDK调用")
+
+    def _jqdata_fundamentals(self, symbol: str, report_count: int = 5) -> ProviderResult:
+        return ProviderResult("jqdata", False, error="JQData财务指标映射未启用；请配置JQDATA_FUNDAMENTALS_ENABLED=true并补充账号权限字段映射")
+
+    def _ricequant_fundamentals(self, symbol: str, report_count: int = 5) -> ProviderResult:
+        return ProviderResult("ricequant", False, error="RiceQuant财务指标映射未启用；请配置RQDATA_FUNDAMENTALS_ENABLED=true并补充账号权限字段映射")
+
+    def _ifind_fundamentals(self, symbol: str, report_count: int = 5) -> ProviderResult:
+        if not os.getenv("IFIND_USERNAME") or not os.getenv("IFIND_PASSWORD"):
+            return ProviderResult("ifind", False, error="IFIND_USERNAME/IFIND_PASSWORD未配置")
+        return ProviderResult("ifind", False, error="iFinD财务指标映射未启用；请按账号权限补充官方SDK字段映射")
 
 
 def normalize_symbol(symbol: str) -> str:

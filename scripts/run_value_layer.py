@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,7 @@ except ModuleNotFoundError:
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from tradingagents.llm_clients.openai_client import OpenAIClient
+from tradingagents.dataflows.fundamentals_quality import ensure_fundamentals_quality
 
 ROOT = Path(__file__).resolve().parents[1]
 ANALYSIS_OUTPUTS = ROOT / "analysis_outputs"
@@ -115,8 +117,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default=os.getenv("CUSTOM_OPENAI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "")
     parser.add_argument("--max-tokens", type=int, default=5000)
     parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--timeout", type=int, default=int(os.getenv("VALUE_LAYER_TIMEOUT", "240")))
+    parser.add_argument("--retries", type=int, default=int(os.getenv("VALUE_LAYER_RETRIES", "3")))
     parser.add_argument("--out-dir", default=str(ANALYSIS_OUTPUTS))
     parser.add_argument("--no-llm", action="store_true", help="Only compose deterministic scaffold from existing reports")
+    parser.add_argument("--allow-fallback", action="store_true", help="Allow deterministic fallback value scaffold when LLM is unavailable")
     return parser.parse_args()
 
 
@@ -153,7 +158,7 @@ def find_latest_raw(symbol: str, date: str, stock_name: str = "") -> Optional[Pa
     for analysis_dir in candidate_analysis_dirs(symbol, stock_name):
         for pattern in patterns:
             candidates.extend(analysis_dir.glob(pattern))
-    candidates = [path for path in candidates if path.is_file()]
+    candidates = [path for path in candidates if path.is_file() and not path.name.endswith("-value-raw.json")]
     candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     return candidates[0] if candidates else None
 
@@ -229,15 +234,88 @@ def get_state_text(raw: dict[str, Any], key: str) -> str:
     return ""
 
 
-def clip(text: str, max_chars: int) -> str:
-    text = re.sub(r"\n{3,}", "\n\n", text.strip())
-    if len(text) <= max_chars:
-        return text
-    cut = text[:max_chars]
-    idx = max(cut.rfind("\n## "), cut.rfind("\n\n"), cut.rfind("。"))
-    if idx > max_chars * 0.55:
-        return cut[: idx + 1].strip() + "\n\n> ……原文过长，已截断。"
-    return cut.rstrip() + "……\n\n> ……原文过长，已截断。"
+TRUNCATION_FORBIDDEN_PATTERNS = (
+    "原文过长",
+    "内容过长",
+    "已截断",
+    "内容已截断",
+    "数据已截断",
+    "truncated",
+)
+
+
+def clip(text: str, max_chars: int | None = None) -> str:
+    del max_chars
+    return re.sub(r"\n{3,}", "\n\n", str(text or "").strip())
+
+
+def ensure_no_truncation_markers(outputs: dict[str, str]) -> None:
+    violations: list[str] = []
+    for name, text in outputs.items():
+        for pattern in TRUNCATION_FORBIDDEN_PATTERNS:
+            if pattern in text:
+                violations.append(f"{name}: {pattern}")
+    if violations:
+        raise RuntimeError("报告包含截断标记，禁止写出：" + "; ".join(violations))
+
+
+def extract_market_price(*texts: str) -> float | None:
+    patterns = [
+        r"当前价格[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"当前价[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"最新收盘价[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"收盘价[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"当前参考价[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+    ]
+    for text in texts:
+        value = str(text or "")
+        for pattern in patterns:
+            match = re.search(pattern, value)
+            if match:
+                try:
+                    price = float(match.group(1))
+                except Exception:
+                    continue
+                if price > 0:
+                    return price
+    return None
+
+
+def format_price_guard(price: float | None) -> str:
+    if price is None:
+        return "当前行情价格: 未提取到；禁止用 PE×EPS 或其他估值公式反推当前股价，必须回到行情源补价后再给具体价格结论。"
+    return (
+        f"当前行情价格: {price:.2f}元。此价格来自行情/技术报告或行情数据源，是全报告唯一当前价锚点；"
+        "禁止用 PE×EPS、PB×BVPS 或任何估值公式反推当前股价。"
+    )
+
+
+def ensure_price_consistency(text: str, market_price: float | None, name: str = "report") -> None:
+    forbidden = ["隐含当前价格", "隐含价格", "反推", "PE与EPS反推", "PE × EPS", "PE×EPS", "EPS × PE", "EPS×PE"]
+    hits = [item for item in forbidden if item in text]
+    if hits:
+        raise RuntimeError(f"{name} 包含禁止的当前价反推/隐含价格表述: {hits}")
+    if market_price is None:
+        raise RuntimeError(f"{name} 缺少行情当前价锚点，禁止生成价值层价格结论。")
+    if market_price < 20:
+        return
+    suspicious: list[float] = []
+    price_keywords = "当前价|当前价格|参考价|目标价|合理价|合理价值|风险回落|回落区间|买入区|低吸区|支撑|压力|止损|减仓|上涨空间|下跌空间"
+    for line in str(text or "").splitlines():
+        if not re.search(price_keywords, line):
+            continue
+        for match in re.finditer(r"(?<![\d.])([0-9]+(?:\.[0-9]+)?)\s*元(?:/股)?", line):
+            try:
+                value = float(match.group(1))
+            except Exception:
+                continue
+            if 0 < value < market_price * 0.35:
+                suspicious.append(value)
+    if suspicious:
+        raise RuntimeError(
+            f"{name} 出现明显脱离当前价{market_price:.2f}元的价格 {suspicious[:8]}；"
+            "疑似使用季度EPS或估值公式错误反推，已中止。"
+        )
 
 
 def build_context(symbol: str, stock_name: str, date: str, raw: dict[str, Any], report_paths: dict[str, Path]) -> dict[str, str]:
@@ -248,14 +326,18 @@ def build_context(symbol: str, stock_name: str, date: str, raw: dict[str, Any], 
     investment_plan = get_state_text(raw, "investment_plan") or get_state_text(raw, "trader_investment_plan") or read_text(report_paths.get("investment_plan")) or read_text(report_paths.get("trader_investment_plan"))
     decision = raw.get("decision") if isinstance(raw.get("decision"), dict) else {}
     decision_text = json.dumps(decision, ensure_ascii=False, indent=2) if decision else final_trade
+    market_price = extract_market_price(market_report, fundamentals_report, final_trade, decision_text, investment_plan)
+    price_guard = format_price_guard(market_price)
     return {
-        "header": f"股票：{stock_name}（{symbol}）\n分析日期：{date}\n市场：中国A股",
+        "header": f"股票：{stock_name}（{symbol}）\n分析日期：{date}\n市场：中国A股\n{price_guard}",
         "market_report": market_report,
         "fundamentals_report": fundamentals_report,
         "final_trade": final_trade,
         "risk_report": risk_report,
         "investment_plan": investment_plan,
         "decision": decision_text,
+        "market_price": "" if market_price is None else f"{market_price:.2f}",
+        "price_guard": price_guard,
     }
 
 
@@ -274,6 +356,7 @@ def make_system_prompt() -> str:
 约束：
 - 不得承诺收益；不得把报告写成确定性荐股。
 - 如果数据不足，必须明确写“数据不足，不能确认”。
+- 如果核心财务门禁已通过，不得继续使用“数据不足，不能确认”这句话；对ROIC、管理层、客户集中度等非硬门槛补充项，只能写为“后续跟踪项”，不得把报告整体写成数据不完整。
 - 对A股要特别关注经营现金流、应收账款、商誉、资产负债率、ROE/ROIC、周期性和政策风险。
 - 价值投资结论必须包含：长期评级、适合/不适合长期持有、合理价值区间、安全边际、买入逻辑失效条件。
 - 最后给出适合投资小白的学习解释。
@@ -304,6 +387,10 @@ def make_user_prompt(context: dict[str, str]) -> str:
 
 {context['header']}
 
+## 价格口径硬约束
+{context['price_guard']}
+请所有价位判断都围绕上述行情当前价，不得自行反推当前价。
+
 ## 当前最终交易决策
 {clip(context['decision'], 1800)}
 
@@ -325,8 +412,8 @@ def make_llm(args: argparse.Namespace):
     kwargs: dict[str, Any] = {
         "temperature": args.temperature,
         "max_tokens": args.max_tokens,
-        "timeout": 120,
-        "max_retries": 1,
+        "timeout": args.timeout,
+        "max_retries": 0,
     }
     api_key = os.getenv("CUSTOM_OPENAI_API_KEY") if args.provider == "custom_openai" else None
     if api_key:
@@ -341,22 +428,60 @@ def make_llm(args: argparse.Namespace):
 
 def invoke_value_committee(args: argparse.Namespace, context: dict[str, str]) -> str:
     if args.no_llm:
-        return build_fallback_value_report(context, "用户指定 --no-llm，未调用大模型。")
-    try:
-        llm = make_llm(args)
-        response = llm.invoke([
-            SystemMessage(content=make_system_prompt()),
-            HumanMessage(content=make_user_prompt(context)),
-        ])
-        content = getattr(response, "content", response)
-        if isinstance(content, list):
-            content = "\n".join(str(item) for item in content)
-        content = str(content).strip()
-        if content:
-            return content
-        return build_fallback_value_report(context, "模型返回为空，使用兜底模板。")
-    except Exception as exc:
-        return build_fallback_value_report(context, f"模型调用失败，使用兜底模板：{exc}")
+        if args.allow_fallback:
+            return build_fallback_value_report(context, "用户指定 --no-llm，未调用大模型。")
+        raise RuntimeError("价值层禁止无LLM兜底：收到 --no-llm 但未显式允许 --allow-fallback。")
+
+    attempts = max(1, int(args.retries))
+    errors: list[str] = []
+    for attempt in range(1, attempts + 1):
+        try:
+            llm = make_llm(args)
+            response = llm.invoke([
+                SystemMessage(content=make_system_prompt()),
+                HumanMessage(content=make_user_prompt(context)),
+            ])
+            content = getattr(response, "content", response)
+            if isinstance(content, list):
+                content = "\n".join(str(item) for item in content)
+            content = str(content).strip()
+            if content:
+                return normalize_nonblocking_missing_language(content)
+            errors.append(f"尝试{attempt}: 模型返回为空")
+        except Exception as exc:
+            errors.append(f"尝试{attempt}: {type(exc).__name__}: {exc}")
+        if attempt < attempts:
+            time.sleep(min(20, 2 ** attempt))
+
+    error_text = "；".join(errors[-attempts:])
+    if args.allow_fallback:
+        return build_fallback_value_report(context, f"模型调用失败，使用兜底模板：{error_text}")
+    raise RuntimeError(f"价值层模型调用失败，已重试{attempts}次；为避免生成兜底版报告，已中止。{error_text}")
+
+
+def ensure_value_report_quality(text: str) -> None:
+    bad_markers = [
+        "价值投资 Agent 委员会报告（兜底版）",
+        "兜底模板",
+        "模型调用失败",
+        "模型返回为空",
+        "Request timed out",
+        "timed out",
+    ]
+    hits = [marker for marker in bad_markers if marker in text]
+    if hits:
+        raise RuntimeError(f"价值层报告未达标，包含兜底/失败标记: {hits}")
+
+
+def normalize_nonblocking_missing_language(text: str) -> str:
+    replacements = {
+        "数据不足，不能确认": "作为后续跟踪项，当前不作为核心结论依据",
+        "技术数据不足，不能确认": "短线技术数据已在交易报告中给出，仍需结合实时盘面跟踪",
+        "由于技术数据不足，不能确认短线趋势": "短线趋势以交易报告中的均线、量能和支撑压力为准，仍需结合实时盘面跟踪",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
 
 
 def build_fallback_value_report(context: dict[str, str], reason: str) -> str:
@@ -526,10 +651,22 @@ def main() -> None:
     probe_texts = [read_text(path) for path in report_paths.values()]
     stock_name = infer_stock_name(symbol, args.stock_name, raw, probe_texts)
     context = build_context(symbol, stock_name, date, raw, report_paths)
+    fundamentals_text, fundamentals_quality = ensure_fundamentals_quality(symbol, context.get("fundamentals_report", ""))
+    context["fundamentals_report"] = fundamentals_text
     value_committee = invoke_value_committee(args, context)
     trading_report = build_trading_report(symbol, stock_name, date, context)
     value_report = build_value_report(symbol, stock_name, date, value_committee)
     combined_report = build_combined_report(symbol, stock_name, date, trading_report, value_report, context)
+    ensure_value_report_quality(value_report)
+    ensure_value_report_quality(combined_report)
+    market_price = float(context["market_price"]) if context.get("market_price") else None
+    ensure_price_consistency(value_report, market_price, "value_report")
+    ensure_price_consistency(combined_report, market_price, "combined_report")
+    ensure_no_truncation_markers({
+        "trading": trading_report,
+        "value": value_report,
+        "combined": combined_report,
+    })
 
     out_dir = Path(args.out_dir).expanduser()
     if not out_dir.is_absolute():
@@ -544,6 +681,7 @@ def main() -> None:
         "report_paths": {key: str(path.relative_to(ROOT)) for key, path in report_paths.items()},
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "agents": [agent.__dict__ for agent in VALUE_AGENTS],
+        "fundamentals_quality": fundamentals_quality,
     }
     paths = write_outputs(out_dir, symbol, stock_name, date, trading_report, value_report, combined_report, metadata)
     for key, path in paths.items():

@@ -487,11 +487,6 @@ class GoogleToolCallHandler:
         
         logger.info(f"[{analyst_name}] 📝 Google模型直接回复，长度: {len(result.content)} 字符")
         
-        # 检查内容长度，如果过长进行处理
-        if len(result.content) > 15000:
-            logger.warning(f"[{analyst_name}] ⚠️ Google模型输出过长，进行截断处理...")
-            return result.content[:10000] + "\n\n[注：内容已截断以确保可读性]"
-        
         return result.content
     
     @staticmethod
@@ -661,8 +656,8 @@ class GoogleToolCallHandler:
         for msg in messages:
             if isinstance(msg, (AIMessage, ToolMessage)):
                 if hasattr(msg, 'content') and len(str(msg.content)) > 5000:
-                    # 截断过长内容
-                    truncated_content = str(msg.content)[:5000] + "\n\n[注：数据已截断以确保处理效率]"
+                    # 仅优化传给模型的上下文长度；不得写入用户可见的省略标记。
+                    truncated_content = str(msg.content)[:5000]
                     if isinstance(msg, AIMessage):
                         optimized_msg = AIMessage(content=truncated_content)
                     else:
@@ -699,7 +694,7 @@ class GoogleToolCallHandler:
             if isinstance(msg, ToolMessage) and hasattr(msg, 'content'):
                 content = str(msg.content)
                 if len(content) > 1000:
-                    content = content[:1000] + "\n\n[注：数据已截断]"
+                    content = content[:1000]
                 tool_results.append(content)
         
         if tool_results:

@@ -21,7 +21,9 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-load_dotenv(ROOT / ".env", override=True)
+sys.path.insert(0, str(ROOT / "scripts"))
+load_dotenv(ROOT / ".env", override=False)
+load_dotenv(ROOT / ".stock-monitor.env", override=True)
 
 from report_paths import results_stock_dir  # noqa: E402
 from tradingagents.quant.backtest import BacktestConfig, run_rolling_backtest, save_backtest_outputs  # noqa: E402

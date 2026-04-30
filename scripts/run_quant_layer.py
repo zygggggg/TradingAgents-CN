@@ -22,7 +22,9 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-load_dotenv(ROOT / ".env", override=True)
+sys.path.insert(0, str(ROOT / "scripts"))
+load_dotenv(ROOT / ".env", override=False)
+load_dotenv(ROOT / ".stock-monitor.env", override=True)
 
 from report_paths import results_stock_dir, safe_name  # noqa: E402
 from tradingagents.quant import generate_quant_report  # noqa: E402
