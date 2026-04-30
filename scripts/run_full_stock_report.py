@@ -295,6 +295,57 @@ def run_quant_backtest(symbol: str, analysis_date: str, fundamentals_text: str, 
     }
 
 
+def _strip_raw_json_section(markdown_text: str) -> str:
+    return str(markdown_text or "").split("## 原始返回JSON", 1)[0].strip()
+
+
+def build_eastmoney_skills_appendix(
+    symbol: str,
+    stock_name: str,
+    paths: Dict[str, Path],
+) -> tuple[str, Dict[str, Any]]:
+    load_env_file(ROOT / ".env")
+    try:
+        from tradingagents.dataflows.providers.china.eastmoney_skills import (
+            eastmoney_skills_available,
+            get_eastmoney_skills_client,
+        )
+    except Exception as exc:
+        return "", {"status": "unavailable", "error": f"{type(exc).__name__}: {exc}"}
+
+    if not eastmoney_skills_available():
+        return "", {"status": "disabled", "reason": "EASTMONEY_SKILLS/MX_APIKEY未配置"}
+
+    client = get_eastmoney_skills_client()
+    outputs: Dict[str, Dict[str, Any]] = {}
+    sections = [
+        "## 10. 东方财富 Skills 增强数据",
+        "",
+        "数据来源：东方财富 Skills / OpenClaw 金融工具；用于增强行情、财务、公告、研报和综合诊股上下文。",
+        "",
+    ]
+    jobs = [
+        ("fundamentals", "金融数据 / 财务透视", paths["eastmoney_fundamentals"], lambda: client.fundamentals_report(symbol, stock_name=stock_name, report_count=5)),
+        ("news", "资讯搜索 / 公告研报", paths["eastmoney_news"], lambda: client.news_report(symbol, stock_name=stock_name, limit_hint=10)),
+        ("diagnose", "综合诊股", paths["eastmoney_diagnose"], lambda: client.stock_diagnosis_report(symbol, stock_name=stock_name)),
+    ]
+
+    for key, title, output_path, runner in jobs:
+        try:
+            text = runner()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(text, encoding="utf-8")
+            outputs[key] = {"status": "completed", "path": str(output_path)}
+            readable = _strip_raw_json_section(text)
+            if readable:
+                sections.extend([f"### {title}", "", f"完整原始返回文件：`{output_path}`", "", readable, ""])
+        except Exception as exc:
+            outputs[key] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+            sections.extend([f"### {title}", "", f"东方财富 Skills 调用失败：{type(exc).__name__}: {exc}", ""])
+
+    return "\n".join(sections).strip() + "\n", {"status": "completed", "outputs": outputs}
+
+
 def rename_backtest_outputs(output_paths: Dict[str, str], stock_dir: Path, analysis_date: str) -> Dict[str, str]:
     prefix = f"{safe_name(stock_dir.name)}-{analysis_date}"
     mapping = {
@@ -371,6 +422,9 @@ def main() -> None:
         "quant_backtest": stock_dir / f"{prefix}-quant-backtest.md",
         "quant_backtest_rows": stock_dir / f"{prefix}-quant-backtest-rows.csv",
         "quant_backtest_json": stock_dir / f"{prefix}-quant-backtest.json",
+        "eastmoney_fundamentals": stock_dir / f"{prefix}-eastmoney-fundamentals.md",
+        "eastmoney_news": stock_dir / f"{prefix}-eastmoney-news.md",
+        "eastmoney_diagnose": stock_dir / f"{prefix}-eastmoney-diagnose.md",
     }
 
     write_status(paths["status"], {"status": "running", "symbol": symbol, "stock_name": stock_name, "date": args.date})
@@ -384,6 +438,7 @@ def main() -> None:
         fundamentals_text = str(state.get("fundamentals_report") or "")
         fundamentals_text, fundamentals_quality = ensure_fundamentals_quality(symbol, fundamentals_text)
         state["fundamentals_report"] = fundamentals_text
+        eastmoney_appendix, eastmoney_skills = build_eastmoney_skills_appendix(symbol, stock_name, paths)
         raw = {
             "stock_symbol": symbol,
             "symbol": symbol,
@@ -394,22 +449,33 @@ def main() -> None:
             "decision": to_jsonable(decision),
             "fundamentals_quality": fundamentals_quality,
             "analysis_quality": analysis_quality,
+            "eastmoney_skills": eastmoney_skills,
             "success": True,
             "generated_at": now_cn().strftime("%Y-%m-%d %H:%M:%S"),
         }
         write_json(paths["raw"], raw)
-        memory_result = run_auto_reflection(
-            graph=graph,
-            symbol=symbol,
-            stock_name=stock_name,
-            analysis_date=args.date,
-            final_state=state,
-            decision=decision,
-            report_path=paths["report"],
-        )
+        try:
+            memory_result = run_auto_reflection(
+                graph=graph,
+                symbol=symbol,
+                stock_name=stock_name,
+                analysis_date=args.date,
+                final_state=state,
+                decision=decision,
+                report_path=paths["report"],
+            )
+        except Exception as memory_exc:
+            memory_result = {
+                "enabled": True,
+                "status": "failed_non_blocking",
+                "error": f"{type(memory_exc).__name__}: {memory_exc}",
+            }
         write_memory_status_file(paths["memory"], memory_result)
         report_text = build_full_report(symbol, stock_name, args.date, state, decision, analysts)
-        report_text += "\n## 10. Memory自动复盘写入\n\n" + format_memory_reflection_section(memory_result) + "\n"
+        if eastmoney_appendix:
+            report_text += "\n" + eastmoney_appendix
+        memory_section_no = "11" if eastmoney_appendix else "10"
+        report_text += f"\n## {memory_section_no}. Memory自动复盘写入\n\n" + format_memory_reflection_section(memory_result) + "\n"
         learning_text = build_learning_report(symbol, stock_name, args.date, decision)
         ensure_no_truncation_markers({"report": report_text, "learn": learning_text})
         ensure_report_price_guard(report_text, fundamentals_text, label="full_report")
@@ -439,6 +505,7 @@ def main() -> None:
                 "quant_layer": quant_result,
                 "quant_backtest": backtest_result,
                 "fundamentals_quality": fundamentals_quality,
+                "eastmoney_skills": eastmoney_skills,
                 "memory_reflection": memory_result,
             },
         )

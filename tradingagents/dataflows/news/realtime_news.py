@@ -739,6 +739,20 @@ def get_realtime_stock_news(ticker: str, curr_date: str, hours_back: int = 6) ->
         logger.info(f"[新闻分析] ========== 步骤2: A股东方财富新闻获取 ==========")
         logger.info(f"[新闻分析] 检测到A股股票 {ticker}，优先尝试使用东方财富新闻源")
         try:
+            from tradingagents.dataflows.providers.china.eastmoney_skills import eastmoney_skills_available, get_eastmoney_skills_client
+
+            if eastmoney_skills_available():
+                clean_ticker = ticker.replace('.SH', '').replace('.SZ', '').replace('.SS', '')\
+                                .replace('.XSHE', '').replace('.XSHG', '')
+                logger.info(f"[新闻分析] 尝试通过东方财富 Skills 获取资讯搜索: {clean_ticker}")
+                skills_report = get_eastmoney_skills_client().news_report(clean_ticker, limit_hint=10)
+                if skills_report and "未配置" not in skills_report:
+                    logger.info(f"[新闻分析] 东方财富 Skills 资讯搜索成功，长度: {len(skills_report)}")
+                    return skills_report
+        except Exception as e:
+            logger.warning(f"[新闻分析] 东方财富 Skills 资讯搜索失败，降级 AKShare 东方财富新闻: {e}")
+
+        try:
             logger.info(f"[新闻分析] 尝试通过 AKShare Provider 获取新闻")
             from tradingagents.dataflows.providers.china.akshare import AKShareProvider
 

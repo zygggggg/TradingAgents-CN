@@ -43,7 +43,8 @@ def _invoke_text(llm, system: str, user: str) -> str:
 
 def _extract_current_price(text: str) -> float | None:
     for pattern in (
-        r"(?:当前行情价格|当前价格|当前价|最新收盘价|收盘价)[^\n\d]{0,40}([0-9]+(?:\.[0-9]+)?)",
+        r"(?:当前行情价格|当前价格|当前价|最新价|最新收盘价|收盘价)\*{0,2}[^\n\d]{0,40}([0-9]+(?:\.[0-9]+)?)",
+        r"\|\s*(?:最新价|当前价|当前价格|收盘价)\s*\|\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
     ):
         match = __import__("re").search(pattern, str(text or ""))
         if match:
@@ -68,6 +69,7 @@ def _ensure_price_guard(report: str, source_text: str) -> None:
 
     suspicious = []
     price_keywords = "当前价|当前价格|参考价|目标价|合理价|合理价值|风险回落|回落区间|买入区|低吸区|支撑|压力|止损|减仓|上涨空间|下跌空间"
+    per_share_metric_keywords = r"EPS|每股收益|每股盈利|BVPS|每股净资产|每股|年化EPS|年化为"
     for line in str(report or "").splitlines():
         if not re.search(price_keywords, line):
             continue
@@ -75,6 +77,14 @@ def _ensure_price_guard(report: str, source_text: str) -> None:
             try:
                 value = float(match.group(1))
             except Exception:
+                continue
+            context = line[max(0, match.start() - 24): match.end() + 24]
+            prefix = line[max(0, match.start() - 3): match.start()]
+            if re.search(per_share_metric_keywords, context, flags=re.IGNORECASE):
+                continue
+            if re.search(r"\d\s*[-—–~至到]\s*$", prefix):
+                continue
+            if re.search(r"(?:价差|收益|亏损|回撤|上涨空间|下跌空间)[^\n]{0,16}\d+(?:\.\d+)?\s*[-—–~至到]\s*\d+(?:\.\d+)?\s*元", context):
                 continue
             if 0 < value < price * 0.35:
                 suspicious.append(value)
@@ -132,19 +142,59 @@ def repair_news_report(symbol: str, stock_name: str, analysis_date: str, toolkit
 def repair_fundamentals_analysis(symbol: str, stock_name: str, analysis_date: str, fundamentals_text: str, llm: Any | None = None) -> Tuple[str, Dict[str, Any]]:
     repaired_text, quality = ensure_fundamentals_quality(symbol, fundamentals_text)
     llm = llm or _make_llm()
-    system = "你是专业股票基本面分析师。必须严格基于用户提供的财务数据和三表摘要分析，不得编造未给出的数据。输出中文Markdown。"
-    user = f"""请基于以下已经通过质量门禁的真实基本面数据，为 {stock_name}（{symbol}）生成完整基本面分析报告。\n\n分析日期：{analysis_date}\n\n必须包含：\n1. 公司与数据源说明\n2. 核心财务指标表：PE、PB、ROE、资产负债率、毛利率、净利率、营收、归母净利润、经营现金流、EPS\n3. 利润表摘要分析\n4. 资产负债表摘要分析\n5. 现金流量表摘要分析\n6. 盈利能力、资产质量、现金流质量分析\n7. PE/PB/成长性估值解读；若PEG无法计算，说明原因但不能说核心数据缺失\n8. 当前价格是否低估/合理/偏高\n9. 合理价位区间、目标价与风险回落区间\n10. 投资建议和不买/减仓条件\n\n禁止使用“工具未返回”“数据不足，不能确认”“无法给出真实PE/PB”等说法，因为下列数据已经通过质量门禁。\n\n真实基本面数据：\n{repaired_text}\n"""
-    report = _invoke_text(llm, system, user)
-    if len(report) < 2500:
-        raise ReportQualityError(f"基本面分析生成过短，不能通过质量门禁: {len(report)} 字符")
-    bad_phrases = ["工具未返回", "数据不足，不能确认", "无法给出真实PE", "无法给出真实PB", "完整财务指标未能充分返回"]
-    found = [phrase for phrase in bad_phrases if phrase in report]
-    if found:
-        raise ReportQualityError("基本面分析包含禁用缺失表述: " + ", ".join(found))
-    _ensure_price_guard(report, repaired_text)
-    _, report_quality = ensure_fundamentals_quality(symbol, report)
-    return report, {"input_quality": quality, "report_quality": report_quality}
+    system = (
+        "你是专业股票基本面分析师。必须严格基于用户提供的财务数据和三表摘要分析，"
+        "不得编造未给出的数据。输出中文Markdown。"
+        "当前价格只能引用输入里的行情价格，EPS/BVPS/净资产等只能引用输入已有字段，"
+        "不得用股价、PE、PB互相倒算。"
+    )
+    base_user = f"""请基于以下已经通过质量门禁的真实基本面数据，为 {stock_name}（{symbol}）生成完整基本面分析报告。
 
+分析日期：{analysis_date}
+
+必须包含：
+1. 公司与数据源说明
+2. 核心财务指标表：PE、PB、ROE、资产负债率、毛利率、净利率、营收、归母净利润、经营现金流、EPS
+3. 利润表摘要分析
+4. 资产负债表摘要分析
+5. 现金流量表摘要分析
+6. 盈利能力、资产质量、现金流质量分析
+7. PE/PB/成长性估值解读；若PEG无法计算，只能说明“盈利增速字段未提供，PEG不作为核心结论依据”
+8. 当前价格是否低估/合理/偏高
+9. 合理价位区间、目标价与风险回落区间
+10. 投资建议和不买/减仓条件
+
+硬性规则：
+- 禁止使用“工具未返回”“数据不足，不能确认”“无法给出真实PE/PB”等说法，因为下列数据已经通过质量门禁。
+- 禁止把当前价、EPS、BVPS、每股净资产互相倒算；没有输入字段就不要计算该字段。
+- 禁止出现“隐含当前价格”“隐含价格”“反推”“PE×EPS”“PE × EPS”“EPS×PE”“EPS × PE”等词串。
+- 当前价只能引用真实基本面数据中的当前行情价格，不得自行估算或从估值指标推导。
+
+真实基本面数据：
+{repaired_text}
+"""
+    bad_phrases = ["工具未返回", "数据不足，不能确认", "无法给出真实PE", "无法给出真实PB", "完整财务指标未能充分返回"]
+    last_error: Exception | None = None
+    for attempt in range(1, 3):
+        user = base_user
+        if attempt > 1:
+            user = (
+                "上一次生成结果未通过质量门禁。请完全重写，尤其不要进行任何股价/PE/PB/EPS/BVPS倒算，"
+                "也不要输出被禁止词串。\n\n" + base_user
+            )
+        report = _invoke_text(llm, system, user)
+        try:
+            if len(report) < 2500:
+                raise ReportQualityError(f"基本面分析生成过短，不能通过质量门禁: {len(report)} 字符")
+            found = [phrase for phrase in bad_phrases if phrase in report]
+            if found:
+                raise ReportQualityError("基本面分析包含禁用缺失表述: " + ", ".join(found))
+            _ensure_price_guard(report, repaired_text)
+            _, report_quality = ensure_fundamentals_quality(symbol, report)
+            return report, {"input_quality": quality, "report_quality": report_quality, "repair_attempts": attempt}
+        except ReportQualityError as exc:
+            last_error = exc
+    raise last_error or ReportQualityError("基本面分析修复失败")
 
 def ensure_analysis_sections(symbol: str, stock_name: str, analysis_date: str, state: Dict[str, Any], toolkit: Any, *, require_news: bool = True) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     state = dict(state)

@@ -90,6 +90,16 @@ def ensure_no_truncation_markers(text: str, output_path: Path) -> None:
     if hits:
         raise RuntimeError(f"事件报告包含截断标记 {hits}: {output_path}")
 
+
+def sanitize_prior_context(text: Any) -> str:
+    forbidden = ("隐含当前价格", "隐含价格", "反推", "PE×EPS", "PE × EPS", "EPS×PE", "EPS × PE")
+    lines = []
+    for line in str(text or "").splitlines():
+        if any(item in line for item in forbidden):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
 def derive_paths(event: Dict[str, Any], stock: Dict[str, Any], quick_report: Optional[Path]) -> Dict[str, Path]:
     stock_name = safe_filename(event.get("name") or stock.get("name") or event.get("symbol") or stock.get("symbol"))
     quote_date = normalize_date(event.get("quote_date") or stock.get("plan_date"))
@@ -221,7 +231,7 @@ def build_markdown(event: Dict[str, Any], stock: Dict[str, Any], quick_report: O
     final_state = result.get("final_state") or {}
     decision = result.get("decision") or {}
     klines = fetch_recent_klines(symbol, 20)
-    prior_context = collect_report_context(ROOT, symbol, stock_name, stock.get("plan_date") or analysis_date, total_limit=10000)
+    prior_context = sanitize_prior_context(collect_report_context(ROOT, symbol, stock_name, stock.get("plan_date") or analysis_date, total_limit=10000))
     memory_status = summarize_memory_status()
 
     investment_debate = final_state.get("investment_debate_state") or {}
@@ -396,17 +406,24 @@ def main() -> None:
             ),
             encoding="utf-8",
         )
-        memory_result = run_auto_reflection(
-            graph=result.get("graph"),
-            symbol=symbol,
-            stock_name=stock_name,
-            analysis_date=analysis_date,
-            final_state=result.get("final_state") or {},
-            decision=result.get("decision"),
-            event=event,
-            stock=stock,
-            report_path=paths["report"],
-        )
+        try:
+            memory_result = run_auto_reflection(
+                graph=result.get("graph"),
+                symbol=symbol,
+                stock_name=stock_name,
+                analysis_date=analysis_date,
+                final_state=result.get("final_state") or {},
+                decision=result.get("decision"),
+                event=event,
+                stock=stock,
+                report_path=paths["report"],
+            )
+        except Exception as memory_exc:
+            memory_result = {
+                "enabled": True,
+                "status": "failed_non_blocking",
+                "error": f"{type(memory_exc).__name__}: {memory_exc}",
+            }
         write_memory_status_file(paths["memory"], memory_result)
         markdown = build_markdown(event, stock, quick_report, result)
         markdown += "\n## 13. Memory自动复盘写入\n\n" + format_memory_reflection_section(memory_result) + "\n"

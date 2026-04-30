@@ -261,11 +261,15 @@ def ensure_no_truncation_markers(outputs: dict[str, str]) -> None:
 
 def extract_market_price(*texts: str) -> float | None:
     patterns = [
-        r"当前价格[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
-        r"当前价[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
-        r"最新收盘价[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
-        r"收盘价[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
-        r"当前参考价[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"当前行情价格\*{0,2}\s*[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"当前价格\*{0,2}\s*[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"当前价\*{0,2}\s*[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"最新价\*{0,2}\s*[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"最新收盘价\*{0,2}\s*[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"收盘价\*{0,2}\s*[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"当前参考价\*{0,2}\s*[:：]\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"\|\s*(?:最新价|当前价|当前价格|收盘价)\s*\|\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"当前股价约\s*[¥￥]?\s*([0-9]+(?:\.[0-9]+)?)",
     ]
     for text in texts:
         value = str(text or "")
@@ -301,6 +305,7 @@ def ensure_price_consistency(text: str, market_price: float | None, name: str = 
         return
     suspicious: list[float] = []
     price_keywords = "当前价|当前价格|参考价|目标价|合理价|合理价值|风险回落|回落区间|买入区|低吸区|支撑|压力|止损|减仓|上涨空间|下跌空间"
+    per_share_metric_keywords = r"EPS|每股收益|每股盈利|BVPS|每股净资产|每股|年化EPS|年化为"
     for line in str(text or "").splitlines():
         if not re.search(price_keywords, line):
             continue
@@ -308,6 +313,14 @@ def ensure_price_consistency(text: str, market_price: float | None, name: str = 
             try:
                 value = float(match.group(1))
             except Exception:
+                continue
+            context = line[max(0, match.start() - 24): match.end() + 24]
+            prefix = line[max(0, match.start() - 3): match.start()]
+            if re.search(per_share_metric_keywords, context, flags=re.IGNORECASE):
+                continue
+            if re.search(r"\d\s*[-—–~至到]\s*$", prefix):
+                continue
+            if re.search(r"(?:价差|收益|亏损|回撤|上涨空间|下跌空间)[^\n]{0,16}\d+(?:\.\d+)?\s*[-—–~至到]\s*\d+(?:\.\d+)?\s*元", context):
                 continue
             if 0 < value < market_price * 0.35:
                 suspicious.append(value)
@@ -355,10 +368,14 @@ def make_system_prompt() -> str:
 
 约束：
 - 不得承诺收益；不得把报告写成确定性荐股。
+- 当前价格只能引用行情源给出的价格锚点；禁止用PE、PB、EPS、BVPS互相倒算。
+- 正文禁止出现“隐含当前价格”“隐含价格”“反推”“PE×EPS”“PE × EPS”“EPS×PE”“EPS × PE”等词串。
 - 如果数据不足，必须明确写“数据不足，不能确认”。
 - 如果核心财务门禁已通过，不得继续使用“数据不足，不能确认”这句话；对ROIC、管理层、客户集中度等非硬门槛补充项，只能写为“后续跟踪项”，不得把报告整体写成数据不完整。
 - 对A股要特别关注经营现金流、应收账款、商誉、资产负债率、ROE/ROIC、周期性和政策风险。
 - 价值投资结论必须包含：长期评级、适合/不适合长期持有、合理价值区间、安全边际、买入逻辑失效条件。
+- 任何“合理价值区间/合理价位区间/目标价”都必须紧邻说明估值口径：例如 PB/ROE 对照、PE/盈利情景、DCF假设、同业比较、或“情景折价区间”。不能只给一个数字区间。
+- 如果PE为负、ROE为负、盈利不可持续，禁止用PE估值；只能用PB/现金流/资产质量/情景折价，并明确这是情景区间不是精确内在价值。
 - 最后给出适合投资小白的学习解释。
 """
 
@@ -389,7 +406,7 @@ def make_user_prompt(context: dict[str, str]) -> str:
 
 ## 价格口径硬约束
 {context['price_guard']}
-请所有价位判断都围绕上述行情当前价，不得自行反推当前价。
+请所有价位判断都围绕上述行情当前价；EPS、BVPS、每股净资产只能引用输入已有字段，不能用当前价和PE/PB倒算，也不要写出任何“反推/隐含价格/PE×EPS”表述。
 
 ## 当前最终交易决策
 {clip(context['decision'], 1800)}
@@ -446,8 +463,17 @@ def invoke_value_committee(args: argparse.Namespace, context: dict[str, str]) ->
                 content = "\n".join(str(item) for item in content)
             content = str(content).strip()
             if content:
-                return normalize_nonblocking_missing_language(content)
-            errors.append(f"尝试{attempt}: 模型返回为空")
+                normalized = normalize_nonblocking_missing_language(content)
+                try:
+                    ensure_value_report_quality(normalized)
+                    ensure_price_consistency(normalized, float(context["market_price"]) if context.get("market_price") else None, "value_committee")
+                    return normalized
+                except Exception as quality_exc:
+                    errors.append(f"尝试{attempt}: 质量门禁失败: {type(quality_exc).__name__}: {quality_exc}")
+                    if attempt < attempts:
+                        continue
+            else:
+                errors.append(f"尝试{attempt}: 模型返回为空")
         except Exception as exc:
             errors.append(f"尝试{attempt}: {type(exc).__name__}: {exc}")
         if attempt < attempts:
@@ -471,6 +497,39 @@ def ensure_value_report_quality(text: str) -> None:
     hits = [marker for marker in bad_markers if marker in text]
     if hits:
         raise RuntimeError(f"价值层报告未达标，包含兜底/失败标记: {hits}")
+    ensure_valuation_range_explained(text)
+
+
+def ensure_valuation_range_explained(text: str) -> None:
+    range_patterns = [
+        r"合理价值区间[：:为\s]*[^\n]{0,80}\d+(?:\.\d+)?\s*(?:元|¥)?\s*[—\-~至到]\s*\d+(?:\.\d+)?",
+        r"合理价位区间[：:为\s]*[^\n]{0,80}\d+(?:\.\d+)?\s*(?:元|¥)?\s*[—\-~至到]\s*\d+(?:\.\d+)?",
+        r"基本面合理区间[：:为\s]*[^\n]{0,80}\d+(?:\.\d+)?\s*(?:元|¥)?\s*[—\-~至到]\s*\d+(?:\.\d+)?",
+    ]
+    method_markers = [
+        "估值方法",
+        "估值口径",
+        "计算口径",
+        "测算口径",
+        "情景折价",
+        "情景区间",
+        "PB",
+        "PE",
+        "DCF",
+        "现金流",
+        "同业",
+        "ROE",
+        "资产质量",
+        "安全边际",
+    ]
+    for pattern in range_patterns:
+        for match in re.finditer(pattern, text):
+            start = max(0, match.start() - 500)
+            end = min(len(text), match.end() + 700)
+            window = text[start:end]
+            if not any(marker in window for marker in method_markers):
+                snippet = re.sub(r"\s+", " ", match.group(0))[:120]
+                raise RuntimeError(f"合理价值区间缺少估值口径说明: {snippet}")
 
 
 def normalize_nonblocking_missing_language(text: str) -> str:

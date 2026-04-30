@@ -87,7 +87,7 @@ METRIC_RULES: Tuple[MetricRule, ...] = (
         "net_margin",
         "净利率",
         (
-            r"净利率[^\n\d\-]{0,40}([+-]?\d+(?:\.\d+)?)\s*%",
+            r"(?:净利率|净利润率|销售净利率|净利润\s*/\s*营业(?:总)?收入)[^\n\d\-]{0,40}([+-]?\d+(?:\.\d+)?)\s*%",
         ),
     ),
     MetricRule(
@@ -110,13 +110,14 @@ METRIC_RULES: Tuple[MetricRule, ...] = (
         (
             r"经营现金流[^\n]*(?:\d+(?:\.\d+)?)(?:万|亿|元)",
             r"经营现金流净额[^\n]*(?:\d+(?:\.\d+)?)(?:万|亿|元)",
+            r"经营活动(?:产生的)?现金流量净额[^\n]*(?:\d+(?:\.\d+)?)(?:万|亿|元)",
         ),
     ),
     MetricRule(
         "current_price",
         "当前价格",
         (
-            r"(?:当前行情价格|当前价格|当前价|最新收盘价|收盘价)[^\n\d]{0,40}([+-]?\d+(?:\.\d+)?)\s*(?:元|¥|人民币)?",
+            r"(?:当前行情价格|当前价格|当前价|最新价|最新收盘价|收盘价)[^\n\d]{0,40}([+-]?\d+(?:\.\d+)?)\s*(?:元|¥|人民币)?",
         ),
     ),
 )
@@ -124,6 +125,11 @@ METRIC_RULES: Tuple[MetricRule, ...] = (
 
 DEFAULT_REQUIRED_METRICS = "current_price,pe,pb,roe,asset_liability_ratio,gross_margin,net_margin"
 REQUIRED_STATEMENT_SECTIONS = ("资产负债表摘要", "利润表摘要", "现金流量表摘要")
+STATEMENT_SECTION_EQUIVALENTS: Dict[str, Tuple[str, ...]] = {
+    "资产负债表摘要": (r"资产负债率",),
+    "利润表摘要": (r"营业(?:总)?收入", r"(?:归属于母公司股东的净利润|归母净利润|净利润)"),
+    "现金流量表摘要": (r"(?:经营现金流|经营现金流净额|经营活动(?:产生的)?现金流量净额)",),
+}
 
 
 def _truthy_env(name: str, default: bool) -> bool:
@@ -163,6 +169,15 @@ def _detect_metrics(text: str) -> Dict[str, str]:
     return detected
 
 
+def _has_statement_section(text: str, section: str) -> bool:
+    if section in text:
+        return True
+    equivalent_patterns = STATEMENT_SECTION_EQUIVALENTS.get(section, ())
+    return bool(equivalent_patterns) and all(
+        re.search(pattern, text, flags=re.IGNORECASE) for pattern in equivalent_patterns
+    )
+
+
 def validate_fundamentals_quality(text: str, *, strict: Optional[bool] = None) -> Dict[str, Any]:
     """Return a deterministic quality report for fundamentals text."""
 
@@ -176,7 +191,9 @@ def validate_fundamentals_quality(text: str, *, strict: Optional[bool] = None) -
 
     missing_sections: List[str] = []
     if _truthy_env("FUNDAMENTALS_REQUIRE_STATEMENTS", False):
-        missing_sections = [section for section in REQUIRED_STATEMENT_SECTIONS if section not in text]
+        missing_sections = [
+            section for section in REQUIRED_STATEMENT_SECTIONS if not _has_statement_section(text, section)
+        ]
 
     ok = bool(text.strip()) and not missing_metrics and not fatal_phrases and not missing_sections
     labels = {key: rules[key].label for key in missing_metrics if key in rules}

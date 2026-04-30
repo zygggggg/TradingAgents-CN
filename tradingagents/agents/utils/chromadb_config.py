@@ -33,6 +33,35 @@ def is_windows_11() -> bool:
     return False
 
 
+def chroma_persist_enabled() -> bool:
+    return os.getenv("MEMORY_CHROMA_PERSIST", "true").lower() == "true"
+
+
+def get_chroma_persist_directory() -> str:
+    raw = os.getenv("MEMORY_CHROMA_DIR") or os.path.join(os.getcwd(), "data", "chroma_memory")
+    path = os.path.abspath(os.path.expanduser(raw))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def get_persistent_chromadb_client():
+    persist_directory = get_chroma_persist_directory()
+    settings = Settings(
+        allow_reset=True,
+        anonymized_telemetry=False,
+    )
+    return chromadb.PersistentClient(path=persist_directory, settings=settings)
+
+
+def get_transient_chromadb_client():
+    settings = Settings(
+        allow_reset=True,
+        anonymized_telemetry=False,
+        is_persistent=False,
+    )
+    return chromadb.Client(settings)
+
+
 def get_win10_chromadb_client():
     """
     获取 Windows 10 兼容的 ChromaDB 客户端
@@ -40,25 +69,16 @@ def get_win10_chromadb_client():
     Returns:
         chromadb.Client: ChromaDB 客户端实例
     """
-    settings = Settings(
-        allow_reset=True,
-        anonymized_telemetry=False,
-        is_persistent=False,
-        # Windows 10 特定配置
-        chroma_db_impl="duckdb+parquet",
-        chroma_api_impl="chromadb.api.segment.SegmentAPI",
-        # 使用临时目录避免权限问题
-        persist_directory=None
-    )
-    
+    if chroma_persist_enabled():
+        return get_persistent_chromadb_client()
+
     try:
-        client = chromadb.Client(settings)
-        return client
-    except Exception as e:
-        # 降级到最基本配置
+        return get_transient_chromadb_client()
+    except Exception:
         basic_settings = Settings(
             allow_reset=True,
-            is_persistent=False
+            anonymized_telemetry=False,
+            is_persistent=False,
         )
         return chromadb.Client(basic_settings)
 
@@ -70,26 +90,16 @@ def get_win11_chromadb_client():
     Returns:
         chromadb.Client: ChromaDB 客户端实例
     """
-    # Windows 11 对 ChromaDB 支持更好，可以使用更现代的配置
-    settings = Settings(
-        allow_reset=True,
-        anonymized_telemetry=False,  # 禁用遥测避免 posthog 错误
-        is_persistent=False,
-        # Windows 11 可以使用默认实现，性能更好
-        chroma_db_impl="duckdb+parquet",
-        chroma_api_impl="chromadb.api.segment.SegmentAPI"
-        # 移除 persist_directory=None，让它使用默认值
-    )
-    
+    if chroma_persist_enabled():
+        return get_persistent_chromadb_client()
+
     try:
-        client = chromadb.Client(settings)
-        return client
-    except Exception as e:
-        # 如果还有问题，使用最简配置
+        return get_transient_chromadb_client()
+    except Exception:
         minimal_settings = Settings(
             allow_reset=True,
-            anonymized_telemetry=False,  # 关键：禁用遥测
-            is_persistent=False
+            anonymized_telemetry=False,
+            is_persistent=False,
         )
         return chromadb.Client(minimal_settings)
 
@@ -112,18 +122,18 @@ def get_optimal_chromadb_client():
             # Windows 10 或更老版本，使用兼容配置
             return get_win10_chromadb_client()
     else:
-        # 非 Windows 系统，使用标准配置
-        settings = Settings(
-            allow_reset=True,
-            anonymized_telemetry=False,
-            is_persistent=False
-        )
-        return chromadb.Client(settings)
+        if chroma_persist_enabled():
+            return get_persistent_chromadb_client()
+        return get_transient_chromadb_client()
 
 
 # 导出配置
 __all__ = [
+    'chroma_persist_enabled',
+    'get_chroma_persist_directory',
     'get_optimal_chromadb_client',
+    'get_persistent_chromadb_client',
+    'get_transient_chromadb_client',
     'get_win10_chromadb_client',
     'get_win11_chromadb_client',
     'is_windows_11'

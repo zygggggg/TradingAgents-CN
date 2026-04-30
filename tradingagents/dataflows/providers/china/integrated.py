@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -49,15 +51,26 @@ class IntegratedChinaMarketDataProvider:
         self.headers = {
             "User-Agent": os.getenv(
                 "CHINA_MARKET_DATA_USER_AGENT",
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             ),
+            "Accept": "application/json,text/plain,*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Connection": "close",
             "Referer": "https://quote.eastmoney.com/",
         }
 
     def source_order(self) -> List[str]:
         raw = os.getenv("CHINA_MARKET_DATA_SOURCES", DEFAULT_SOURCE_ORDER)
-        return [item.strip().lower() for item in raw.split(",") if item.strip()]
+        order = [item.strip().lower() for item in raw.split(",") if item.strip()]
+        try:
+            from .eastmoney_skills import eastmoney_skills_available
+
+            if eastmoney_skills_available() and "eastmoney_skills" not in order:
+                order.insert(0, "eastmoney_skills")
+        except Exception:
+            pass
+        return order
 
     def get_stock_info(self, symbol: str) -> Dict:
         symbol = normalize_symbol(symbol)
@@ -110,7 +123,12 @@ class IntegratedChinaMarketDataProvider:
 
         for source in self.source_order():
             try:
-                if source == "eastmoney":
+                if source == "eastmoney_skills":
+                    result = self._eastmoney_skills_fundamentals(symbol, report_count)
+                    if result.ok and isinstance(result.data, str) and result.data.strip():
+                        return result.data
+                    errors.append(f"eastmoney_skills: {result.error or 'empty financial payload'}")
+                elif source == "eastmoney":
                     payload = self._eastmoney_fundamentals(symbol, report_count=report_count)
                     if payload.get("main_indicators"):
                         return format_fundamentals_report(symbol, payload)
@@ -141,6 +159,8 @@ class IntegratedChinaMarketDataProvider:
 
     def _try_info_source(self, source: str, symbol: str) -> ProviderResult:
         try:
+            if source == "eastmoney_skills":
+                return self._eastmoney_skills_not_structured(symbol, "stock_info")
             if source == "eastmoney":
                 return ProviderResult(source, True, self._eastmoney_info(symbol))
             if source == "tencent":
@@ -167,6 +187,8 @@ class IntegratedChinaMarketDataProvider:
         period: str,
     ) -> ProviderResult:
         try:
+            if source == "eastmoney_skills":
+                return self._eastmoney_skills_not_structured(symbol, "history")
             if source == "eastmoney":
                 return ProviderResult(source, True, self._eastmoney_history(symbol, start_date, end_date, period))
             if source == "tencent":
@@ -188,26 +210,68 @@ class IntegratedChinaMarketDataProvider:
         headers = dict(self.headers)
         if referer:
             headers["Referer"] = referer
-        retries = max(1, int(os.getenv("CHINA_MARKET_DATA_RETRIES", "3")))
+        retries = max(1, int(os.getenv("CHINA_MARKET_DATA_RETRIES", "4")))
         backoff = max(0.0, float(os.getenv("CHINA_MARKET_DATA_BACKOFF_SECONDS", "0.8")))
         last_error: Optional[Exception] = None
+        candidate_urls = eastmoney_request_urls(url) if "eastmoney.com" in url else [url]
+
         for attempt in range(1, retries + 1):
-            try:
-                response = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
-                response.raise_for_status()
-                if not response.text.strip():
-                    raise RuntimeError("empty response")
-                return response
-            except requests.RequestException as exc:
-                last_error = exc
-            except RuntimeError as exc:
-                last_error = exc
+            for candidate_url in candidate_urls:
+                try:
+                    response = self.session.get(candidate_url, params=params, headers=headers, timeout=self.timeout)
+                    response.raise_for_status()
+                    if not response.text.strip():
+                        raise RuntimeError("empty response")
+                    return response
+                except (requests.RequestException, RuntimeError) as exc:
+                    last_error = exc
+                    logger.debug("A股数据请求失败 %s/%s [%s]: %s", attempt, retries, candidate_url, exc)
+                    if "eastmoney.com" in candidate_url:
+                        curl_response = self._curl_get(candidate_url, params=params, headers=headers)
+                        if curl_response is not None:
+                            return curl_response
             if attempt < retries:
-                sleep_seconds = backoff * attempt
-                logger.debug("A股数据请求失败，准备重试 %s/%s: %s", attempt, retries, last_error)
+                sleep_seconds = backoff * attempt + random.uniform(0, 0.35)
                 if sleep_seconds:
                     time.sleep(sleep_seconds)
         raise RuntimeError(f"request failed after {retries} attempts: {last_error}")
+
+    def _curl_get(self, url: str, *, params: Optional[Dict], headers: Dict[str, str]) -> Optional[requests.Response]:
+        full_url = requests.Request("GET", url, params=params).prepare().url or url
+        command = [
+            "curl",
+            "--http1.1",
+            "-sS",
+            "--compressed",
+            "--connect-timeout",
+            str(min(self.timeout, 8)),
+            "--max-time",
+            str(self.timeout + 8),
+            "--retry",
+            "1",
+            "--retry-delay",
+            "1",
+            "-A",
+            headers.get("User-Agent", self.headers["User-Agent"]),
+            "-e",
+            headers.get("Referer", self.headers["Referer"]),
+            full_url,
+        ]
+        try:
+            completed = subprocess.run(command, text=True, capture_output=True, timeout=self.timeout + 12)
+        except Exception as exc:
+            logger.debug("curl 兜底请求异常 [%s]: %s", url, exc)
+            return None
+        body = (completed.stdout or "").strip()
+        if completed.returncode != 0 or not body:
+            logger.debug("curl 兜底请求失败 [%s]: %s", url, (completed.stderr or "")[:200])
+            return None
+        response = requests.Response()
+        response.status_code = 200
+        response.url = full_url
+        response._content = body.encode("utf-8")
+        response.encoding = "utf-8"
+        return response
 
     def _eastmoney_info(self, symbol: str) -> Dict:
         # The realtime push2 endpoint can be unstable on some networks.  The
@@ -261,7 +325,7 @@ class IntegratedChinaMarketDataProvider:
         }
         if latest_only:
             params["lmt"] = "1"
-        response = self._get("https://push2his.eastmoney.com/api/qt/stock/kline/get", params=params)
+        response = self._get("https://1.push2his.eastmoney.com/api/qt/stock/kline/get", params=params)
         payload = response.json()
         data = payload.get("data") or {}
         klines = data.get("klines") or []
@@ -565,6 +629,37 @@ class IntegratedChinaMarketDataProvider:
             return ProviderResult("ifind", False, error="IFIND_USERNAME/IFIND_PASSWORD未配置")
         return ProviderResult("ifind", False, error="iFinD财务指标映射未启用；请按账号权限补充官方SDK字段映射")
 
+    def _eastmoney_skills_not_structured(self, symbol: str, capability: str) -> ProviderResult:
+        try:
+            from .eastmoney_skills import eastmoney_skills_available
+
+            if not eastmoney_skills_available():
+                return ProviderResult("eastmoney_skills", False, error="EASTMONEY_APIKEY/MX_APIKEY未配置")
+        except Exception as exc:
+            return ProviderResult("eastmoney_skills", False, error=str(exc))
+        return ProviderResult(
+            "eastmoney_skills",
+            False,
+            error=f"东方财富Skills的{capability}当前作为投研文本工具使用，不作为结构化行情/K线源",
+        )
+
+    def _eastmoney_skills_fundamentals(self, symbol: str, report_count: int = 5) -> ProviderResult:
+        try:
+            from .eastmoney_skills import get_eastmoney_skills_client
+
+            try:
+                info = self._eastmoney_info(symbol)
+            except Exception:
+                info = {}
+            report = get_eastmoney_skills_client().fundamentals_report(
+                symbol,
+                stock_name=info.get("name") if isinstance(info, dict) else None,
+                report_count=report_count,
+            )
+            return ProviderResult("eastmoney_skills", True, data=report)
+        except Exception as exc:
+            return ProviderResult("eastmoney_skills", False, error=str(exc))
+
 
 def normalize_symbol(symbol: str) -> str:
     text = str(symbol).strip().upper()
@@ -650,6 +745,26 @@ def safe_number(value) -> Optional[float]:
     except Exception:
         return None
 
+
+
+def eastmoney_request_urls(url: str) -> List[str]:
+    """Return Eastmoney URL candidates for networks that drop default push2 hosts."""
+    if "push2his.eastmoney.com" in url:
+        base_url = re.sub(r"https://(?:\d+\.)?push2his\.eastmoney\.com", "https://push2his.eastmoney.com", url)
+        return [
+            base_url.replace("push2his.eastmoney.com", "1.push2his.eastmoney.com"),
+            base_url.replace("push2his.eastmoney.com", "2.push2his.eastmoney.com"),
+            base_url.replace("push2his.eastmoney.com", "8.push2his.eastmoney.com"),
+            base_url,
+        ]
+    if "push2.eastmoney.com" in url:
+        base_url = re.sub(r"https://(?:\d+\.)?push2\.eastmoney\.com", "https://push2.eastmoney.com", url)
+        return [
+            base_url.replace("push2.eastmoney.com", "push2delay.eastmoney.com"),
+            base_url.replace("push2.eastmoney.com", "82.push2delay.eastmoney.com"),
+            base_url,
+        ]
+    return [url]
 
 def eastmoney_symbol(symbol: str) -> str:
     suffix = "SH" if exchange_prefix(symbol) == "sh" else "BJ" if exchange_prefix(symbol) == "bj" else "SZ"
@@ -771,9 +886,9 @@ def format_fundamentals_report(symbol: str, payload: Dict[str, Any]) -> str:
                 f"- 当前价格: {current_price:.2f}元" if current_price is not None else "- 当前价格: N/A",
                 f"- 总股本: {total_share / 100000000:.2f}亿股" if total_share is not None else "- 总股本: N/A",
                 f"- 总市值: {format_money(market_cap)}",
-                f"- 简单PE（按最新报告期净利润，非TTM）: {format_multiple(pe_simple)}",
-                f"- 简单PB（按最新股东权益）: {format_multiple(pb_simple)}",
-                f"- 简单PS（按最新报告期收入，非TTM）: {format_multiple(ps_simple)}",
+                f"- 非TTM PE（按最新报告期累计净利润口径）: {format_multiple(pe_simple)}",
+                f"- 最新股东权益PB（按最新股东权益口径）: {format_multiple(pb_simple)}",
+                f"- 非TTM PS（按最新报告期累计收入口径）: {format_multiple(ps_simple)}",
             ]
         )
 
@@ -856,7 +971,7 @@ def format_fundamentals_report(symbol: str, payload: Dict[str, Any]) -> str:
         [
             "",
             "## 基本面阅读提示",
-            "- 上方简单PE/PS使用最新报告期累计利润/收入，不能等同TTM估值；年报口径更适合看全年PE/PS。",
+            "- 上方非TTM PE/PS使用最新报告期累计利润/收入，不能等同TTM估值；年报口径更适合看全年PE/PS。",
             "- PEG需要未来盈利增速预测，不能只靠历史财报直接给强结论。",
             "- 若收入同比为负但利润同比改善，说明成本/费用控制或非经常因素可能影响利润，需要结合年报附注继续判断。",
             "- 经营现金流为负或明显弱于净利润时，要重点关注回款、合同负债和季节性。",
@@ -980,3 +1095,7 @@ def get_integrated_china_stock_info(symbol: str) -> Dict:
 
 def get_integrated_china_stock_data(symbol: str, start_date: str, end_date: str, period: str = "daily") -> str:
     return get_integrated_china_provider().get_stock_data(symbol, start_date, end_date, period)
+
+
+def get_integrated_china_fundamentals(symbol: str, report_count: int = 5) -> str:
+    return get_integrated_china_provider().get_fundamentals_data(symbol, report_count=report_count)

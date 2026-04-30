@@ -452,7 +452,7 @@ def _score_valuation(metrics: Dict[str, Any]) -> Dict[str, Any]:
             score -= 6
     if profit_yoy is not None and profit_yoy > 30:
         score += 6
-    return _factor(score, "估值", "简单PE/PB/PS与利润增速匹配度")
+    return _factor(score, "估值", "非TTM PE/PB/PS与利润增速匹配度")
 
 
 def _score_quality(metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -605,7 +605,7 @@ def format_quant_report(result: QuantAnalysisResult) -> str:
             f"- 5/20/60日收益: {_fmt_pct(metrics.get('return_5d'))} / {_fmt_pct(metrics.get('return_20d'))} / {_fmt_pct(metrics.get('return_60d'))}",
             f"- MA5/MA20/MA60: {_fmt(metrics.get('ma5'))} / {_fmt(metrics.get('ma20'))} / {_fmt(metrics.get('ma60'))}",
             f"- RSI14: {_fmt(metrics.get('rsi14'))}，20日年化波动: {_fmt_pct(metrics.get('volatility_20d_annualized'))}，60日最大回撤: {_fmt_pct(metrics.get('max_drawdown_60d'))}",
-            f"- 简单PE/PB/PS: {_fmt(metrics.get('pe_simple'))}x / {_fmt(metrics.get('pb_simple'))}x / {_fmt(metrics.get('ps_simple'))}x",
+            f"- 非TTM PE/PB/PS: {_fmt(metrics.get('pe_simple'))}x / {_fmt(metrics.get('pb_simple'))}x / {_fmt(metrics.get('ps_simple'))}x",
             f"- 收入同比/利润同比/ROE: {_fmt_pct(metrics.get('revenue_yoy'))} / {_fmt_pct(metrics.get('profit_yoy'))} / {_fmt_pct(metrics.get('roe'))}",
         ]
     )

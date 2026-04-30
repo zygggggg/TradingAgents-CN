@@ -27,6 +27,17 @@ except ImportError:
     BaostockProvider = None
     BAOSTOCK_AVAILABLE = False
 
+
+# 导入东方财富 Skills / OpenClaw 适配器
+try:
+    from .eastmoney_skills import EastmoneySkillsClient, get_eastmoney_skills_client, eastmoney_skills_available
+    EASTMONEY_SKILLS_AVAILABLE = True
+except ImportError:
+    EastmoneySkillsClient = None
+    get_eastmoney_skills_client = None
+    eastmoney_skills_available = None
+    EASTMONEY_SKILLS_AVAILABLE = False
+
 # 导入基本面快照工具
 try:
     from .fundamentals_snapshot import get_fundamentals_snapshot
@@ -44,5 +55,9 @@ __all__ = [
     'BAOSTOCK_AVAILABLE',
     'get_fundamentals_snapshot',
     'FUNDAMENTALS_SNAPSHOT_AVAILABLE',
+    'EastmoneySkillsClient',
+    'get_eastmoney_skills_client',
+    'eastmoney_skills_available',
+    'EASTMONEY_SKILLS_AVAILABLE',
 ]
 
