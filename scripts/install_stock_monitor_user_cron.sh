@@ -34,7 +34,7 @@ cat >> "$TMP_CRON" <<EOF
 SHELL=/bin/bash
 
 # 盘中每小时检查关键价位：09:30、10:30、11:30、13:30、14:30。
-30 9-11,13-14 * * 1-5 cd $PROJECT_DIR && set -a && source $ENV_FILE && set +a && $PYTHON_BIN scripts/monitor_watchlist.py --notify --ai-on-trigger >> $LOG_DIR/stock_monitor.log 2>&1
+30 9-11,13-14 * * 1-5 cd $PROJECT_DIR && set -a && source $ENV_FILE && set +a && $PYTHON_BIN scripts/monitor_watchlist.py --notify >> $LOG_DIR/stock_monitor.log 2>&1
 
 # 午盘/收盘心跳：不触发关键线也发一次状态。
 35 11 * * 1-5 cd $PROJECT_DIR && set -a && source $ENV_FILE && set +a && $PYTHON_BIN scripts/monitor_watchlist.py --force --notify --repeat-heartbeat >> $LOG_DIR/stock_monitor.log 2>&1

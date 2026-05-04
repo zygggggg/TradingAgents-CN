@@ -292,6 +292,76 @@ def triggered_key(symbol, event, quote_date):
     return "%s:%s:%s" % (symbol, event, today)
 
 
+def format_price(value):
+    # type: (Any) -> str
+    if value is None or value == "":
+        return "N/A"
+    try:
+        return "%.2f" % float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def build_level_pairs(levels):
+    # type: (Dict[str, Any]) -> List[tuple]
+    pairs = []
+    for key, label in [
+        ("hard_stop", "风控线"),
+        ("risk_breakdown", "风险线"),
+        ("buy_zone_low", "低吸下沿"),
+        ("buy_zone_high", "低吸上沿"),
+        ("breakout", "突破线"),
+        ("strong_breakout_low", "强突破下沿"),
+        ("strong_breakout_high", "强突破上沿"),
+        ("take_profit_1", "止盈1"),
+        ("take_profit_2", "止盈2"),
+        ("take_profit_3_low", "止盈3下沿"),
+        ("take_profit_3_high", "止盈3上沿"),
+    ]:
+        value = levels.get(key)
+        if value is None:
+            continue
+        try:
+            pairs.append((float(value), label, key))
+        except (TypeError, ValueError):
+            continue
+    return sorted(pairs, key=lambda item: item[0])
+
+
+def resolve_nearest_bounds(levels, price):
+    # type: (Dict[str, Any], Any) -> Dict[str, Any]
+    try:
+        current = float(price)
+    except (TypeError, ValueError):
+        return {"lower_bound": None, "lower_bound_label": "", "upper_bound": None, "upper_bound_label": ""}
+
+    lower = None
+    upper = None
+    for level, label, key in build_level_pairs(levels):
+        if level <= current:
+            lower = (level, label, key)
+        if upper is None and level >= current:
+            upper = (level, label, key)
+
+    return {
+        "lower_bound": lower[0] if lower else None,
+        "lower_bound_label": lower[1] if lower else "",
+        "upper_bound": upper[0] if upper else None,
+        "upper_bound_label": upper[1] if upper else "",
+    }
+
+
+def normalize_event_bounds(levels, price, lower=None, upper=None, lower_label="下界", upper_label="上界"):
+    # type: (Dict[str, Any], Any, Any, Any, str, str) -> Dict[str, Any]
+    nearest = resolve_nearest_bounds(levels, price)
+    return {
+        "lower_bound": lower if lower is not None else nearest.get("lower_bound"),
+        "lower_bound_label": lower_label if lower is not None else nearest.get("lower_bound_label", "下界"),
+        "upper_bound": upper if upper is not None else nearest.get("upper_bound"),
+        "upper_bound_label": upper_label if upper is not None else nearest.get("upper_bound_label", "上界"),
+    }
+
+
 def evaluate_stock(stock, quote):
     # type: (Dict[str, Any], Dict[str, Any]) -> List[Dict[str, Any]]
     symbol = stock["symbol"]
@@ -308,43 +378,82 @@ def evaluate_stock(stock, quote):
     events = []  # type: List[Dict[str, Any]]
     buy_low = levels.get("buy_zone_low")
     buy_high = levels.get("buy_zone_high")
+    risk_breakdown = levels.get("risk_breakdown")
     hard_stop = levels.get("hard_stop")
     breakout = levels.get("breakout")
+    strong_breakout_low = levels.get("strong_breakout_low")
+    strong_breakout_high = levels.get("strong_breakout_high")
     tp1 = levels.get("take_profit_1")
     tp2 = levels.get("take_profit_2")
     tp3_low = levels.get("take_profit_3_low")
     breakout_min_volume = volume_cfg.get("breakout_min_volume")
     selloff_volume = volume_cfg.get("selloff_volume")
 
-    def add(event, severity, title, body):
-        events.append({"event": event, "severity": severity, "title": title, "body": body, "symbol": symbol, "name": name, "price": price, "volume": volume, "quote_date": quote_date, "source": quote.get("source")})
+    def add(event, severity, title, body, lower=None, upper=None, lower_label="下界", upper_label="上界", reached_label="关键位"):
+        bounds = normalize_event_bounds(levels, price, lower, upper, lower_label, upper_label)
+        events.append({
+            "event": event,
+            "severity": severity,
+            "title": title,
+            "body": body,
+            "symbol": symbol,
+            "name": name,
+            "price": price,
+            "volume": volume,
+            "quote_date": quote_date,
+            "source": quote.get("source"),
+            "lower_bound": bounds.get("lower_bound"),
+            "lower_bound_label": bounds.get("lower_bound_label"),
+            "upper_bound": bounds.get("upper_bound"),
+            "upper_bound_label": bounds.get("upper_bound_label"),
+            "reached_label": reached_label,
+        })
 
-    if hard_stop is not None and price <= hard_stop:
+    if risk_breakdown is not None and price < risk_breakdown:
+        extra = ""
+        title = "%s 跌破风险线" % name
+        if selloff_volume and volume and volume >= selloff_volume:
+            title = "%s 放量跌破风险线" % name
+            extra = "\n\n成交量 %.0f 已达到/超过放量阈值 %.0f，风控信号更强。" % (volume, selloff_volume)
+        add("risk_breakdown", "critical", title, "已达到风险线。", upper=risk_breakdown, upper_label="风险线", reached_label="风险线")
+    elif hard_stop is not None and price <= hard_stop:
         extra = ""
         if selloff_volume and volume and volume >= selloff_volume:
             extra = "\n\n成交量 %.0f 已达到/超过放量阈值 %.0f，风控信号更强。" % (volume, selloff_volume)
-        add("hard_stop", "critical", "%s 触发风控线" % name, "当前价 %.2f ≤ 风控线 %.2f。\n\n原计划：%s%s" % (price, hard_stop, actions.get("stop_action", "有效跌破风控线，降低仓位。"), extra))
+        add("hard_stop", "critical", "%s 触发风控线" % name, "已达到风控线。", upper=hard_stop, upper_label="风控线", reached_label="风控线")
     elif buy_low is not None and buy_high is not None and buy_low <= price <= buy_high:
-        add("buy_zone", "info", "%s 进入低吸观察区" % name, "当前价 %.2f 位于 %.2f-%.2f。\n\n原计划：%s\n\n注意：不是自动买入，请人工确认成交量和大盘环境。" % (price, buy_low, buy_high, actions.get("buy_zone_action", "观察是否缩量止跌。")))
-    elif breakout is not None and price >= breakout:
+        add("buy_zone", "info", "%s 进入低吸观察区" % name, "已达到低吸观察区。", lower=buy_low, upper=buy_high, lower_label="低吸下沿", upper_label="低吸上沿", reached_label="低吸观察区")
+    elif breakout is not None and price >= breakout and not (strong_breakout_low is not None and price >= strong_breakout_low):
         volume_note = ""
         if breakout_min_volume:
             if volume and volume >= breakout_min_volume:
                 volume_note = "\n\n成交量 %.0f ≥ 放量阈值 %.0f，突破质量较好。" % (volume, breakout_min_volume)
             else:
                 volume_note = "\n\n当前成交量 %s，尚未确认达到放量阈值 %.0f，谨防假突破。" % (volume if volume is not None else "N/A", breakout_min_volume)
-        add("breakout", "important", "%s 触发突破观察线" % name, "当前价 %.2f ≥ 突破线 %.2f。\n\n原计划：%s%s" % (price, breakout, actions.get("breakout_action", "突破后重新评估仓位。"), volume_note))
+        add("breakout", "important", "%s 触发突破观察线" % name, "已达到突破观察线。", lower=breakout, upper=strong_breakout_low or tp1, lower_label="突破线", upper_label="上方界限", reached_label="突破观察线")
+
+    if strong_breakout_low is not None and price >= strong_breakout_low:
+        volume_note = ""
+        if breakout_min_volume:
+            if volume and volume >= breakout_min_volume:
+                volume_note = "\n\n成交量 %.0f ≥ 放量阈值 %.0f，强突破质量较好。" % (volume, breakout_min_volume)
+            else:
+                volume_note = "\n\n当前成交量 %s，尚未确认达到放量阈值 %.0f，谨防强突破假信号。" % (volume if volume is not None else "N/A", breakout_min_volume)
+        high_note = ""
+        if strong_breakout_high is not None:
+            high_note = "，强突破观察区 %.2f-%.2f" % (strong_breakout_low, strong_breakout_high)
+        add("strong_breakout", "important", "%s 触发强突破观察线" % name, "已达到强突破观察线。", lower=strong_breakout_low, upper=strong_breakout_high, lower_label="强突破下沿", upper_label="强突破上沿", reached_label="强突破观察线")
 
     if tp3_low is not None and price >= tp3_low:
-        add("take_profit_3", "important", "%s 到达第三止盈区" % name, "当前价 %.2f ≥ %.2f。\n\n原计划：%s" % (price, tp3_low, actions.get("tp3_action", "兑现剩余部分或保留底仓。")))
+        add("take_profit_3", "important", "%s 到达第三止盈区" % name, "已达到第三止盈区。", lower=tp3_low, upper=levels.get("take_profit_3_high"), lower_label="止盈3下沿", upper_label="止盈3上沿", reached_label="第三止盈区")
     elif tp2 is not None and price >= tp2:
-        add("take_profit_2", "important", "%s 到达第二止盈区" % name, "当前价 %.2f ≥ %.2f。\n\n原计划：%s" % (price, tp2, actions.get("tp2_action", "分批止盈。")))
+        add("take_profit_2", "important", "%s 到达第二止盈区" % name, "已达到第二止盈区。", lower=tp2, upper=tp3_low, lower_label="止盈2", upper_label="止盈3下沿", reached_label="第二止盈区")
     elif tp1 is not None and price >= tp1:
-        add("take_profit_1", "info", "%s 到达第一止盈区" % name, "当前价 %.2f ≥ %.2f。\n\n原计划：%s" % (price, tp1, actions.get("tp1_action", "分批止盈。")))
+        add("take_profit_1", "info", "%s 到达第一止盈区" % name, "已达到第一止盈区。", lower=tp1, upper=tp2, lower_label="止盈1", upper_label="止盈2", reached_label="第一止盈区")
 
     if not events:
         watched = []
-        for label, level in [("低吸上沿", buy_high), ("风控线", hard_stop), ("突破线", breakout), ("止盈1", tp1)]:
+        for label, level in [("低吸上沿", buy_high), ("风险跌破线", risk_breakdown), ("风控线", hard_stop), ("突破线", breakout), ("强突破线", strong_breakout_low), ("止盈1", tp1)]:
             if level is not None:
                 watched.append("%s %.2f（距离 %+.2f%%）" % (label, level, pct_distance(price, level)))
         events.append({"event": "heartbeat", "severity": "normal", "title": "%s 未触发关键线" % name, "body": "当前价 %.2f，未触发买入/止损/突破/止盈条件。\n%s" % (price, "\n".join(watched)), "symbol": symbol, "name": name, "price": price, "volume": volume, "quote_date": quote_date, "source": quote.get("source")})
@@ -354,19 +463,28 @@ def evaluate_stock(stock, quote):
 def format_event(event, mode):
     # type: (Dict[str, Any], str) -> str
     severity_icon = {"critical": "🔴", "important": "🟠", "info": "🔵", "warning": "🟡", "normal": "⚪"}.get(event.get("severity"), "⚪")
+    if event.get("event") not in ("heartbeat", "data_missing"):
+        lines = [
+            "## %s %s" % (severity_icon, event["title"]),
+            "",
+            "- 股票：%s（%s）" % (event.get("name"), event.get("symbol")),
+            "- 已达到：%s" % (event.get("reached_label") or event.get("title") or "关键位"),
+            "- 下界：%s %s" % (event.get("lower_bound_label") or "下界", format_price(event.get("lower_bound"))),
+            "- 上界：%s %s" % (event.get("upper_bound_label") or "上界", format_price(event.get("upper_bound"))),
+            "- 当前价格：%s" % format_price(event.get("price")),
+            "> 仅提醒，不自动交易。",
+        ]
+        return "\n".join(lines)
+
     lines = [
         "## %s %s" % (severity_icon, event["title"]),
         "",
         "- 股票：%s（%s）" % (event.get("name"), event.get("symbol")),
-        "- 当前价：%s" % event.get("price", "N/A"),
-        "- 成交量：%s" % event.get("volume", "N/A"),
-        "- 行情日期：%s" % (event.get("quote_date") or "N/A"),
-        "- 数据源：%s" % (event.get("source") or "N/A"),
-        "- 运行模式：%s" % mode,
+        "- 当前价格：%s" % format_price(event.get("price")),
         "",
         event.get("body", ""),
         "",
-        "> 仅提醒，不自动交易；请结合仓位、风险承受能力和最新行情人工确认。",
+        "> 仅提醒，不自动交易。",
     ]
     return "\n".join(lines)
 
@@ -389,8 +507,9 @@ def main():
     parser.add_argument("--notify", action="store_true", help="Send DingTalk notifications when DINGTALK_WEBHOOK is configured")
     parser.add_argument("--force", action="store_true", help="Run outside A-share trading session")
     parser.add_argument("--repeat-heartbeat", action="store_true", help="Also notify non-trigger heartbeat messages")
-    parser.add_argument("--ai-on-trigger", action="store_true", help="Use AI to explain triggered non-heartbeat events before notifying")
+    parser.add_argument("--ai-on-trigger", action="store_true", help="Deprecated: AI explanation is skipped unless --generate-reports is also set")
     parser.add_argument("--ai-no-llm", action="store_true", help="Validate AI explanation path without calling LLM")
+    parser.add_argument("--generate-reports", action="store_true", help="Generate quick/agent reports for triggered events")
     args = parser.parse_args()
 
     now = now_cn()
@@ -415,19 +534,21 @@ def main():
         all_events.extend(events)
         for event in events:
             will_notify = bool(args.notify and webhook and should_notify(event, state, repeat_heartbeat=args.repeat_heartbeat))
-            should_explain = args.ai_on_trigger and event.get("event") not in ("heartbeat", "data_missing") and (will_notify or args.force)
+            should_generate_reports = bool(args.generate_reports and event.get("event") not in ("heartbeat", "data_missing"))
+            should_explain = should_generate_reports and args.ai_on_trigger and (will_notify or args.force)
             if should_explain:
                 explanation = explain_event(event, stock, ROOT, no_llm=args.ai_no_llm)
                 if explanation:
                     event["body"] = "%s\n\n## AI解释\n%s" % (event.get("body", ""), explanation)
             message = format_event(event, "force" if args.force else "session")
-            report_path = save_event_report(event, message)
-            if report_path is not None:
-                event["report_path"] = str(report_path)
-                agent_log = start_agent_report(event, stock, report_path, notify=bool(args.notify and webhook))
-                message = "%s\n\n- 快速事件报告：%s" % (message, report_path)
-                if agent_log is not None:
-                    message = "%s\n- 完整Agent报告：后台生成中，完成后会另发钉钉；日志：%s" % (message, agent_log)
+            if should_generate_reports:
+                report_path = save_event_report(event, message)
+                if report_path is not None:
+                    event["report_path"] = str(report_path)
+                    agent_log = start_agent_report(event, stock, report_path, notify=bool(args.notify and webhook))
+                    message = "%s\n\n- 快速事件报告：%s" % (message, report_path)
+                    if agent_log is not None:
+                        message = "%s\n- 完整Agent报告：后台生成中，完成后会另发钉钉；日志：%s" % (message, agent_log)
             print("\n" + "=" * 80)
             print(message)
             if will_notify:

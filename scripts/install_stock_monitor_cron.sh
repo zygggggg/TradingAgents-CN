@@ -26,7 +26,7 @@ SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # A股盘中，每小时检查一次关键价位；脚本自身也会判断交易时段。
-30 9-11,13-14 * * 1-5 root cd $PROJECT_DIR && set -a && source $ENV_FILE && set +a && $PYTHON_BIN scripts/monitor_watchlist.py --notify --ai-on-trigger >> $LOG_DIR/stock_monitor.log 2>&1
+30 9-11,13-14 * * 1-5 root cd $PROJECT_DIR && set -a && source $ENV_FILE && set +a && $PYTHON_BIN scripts/monitor_watchlist.py --notify >> $LOG_DIR/stock_monitor.log 2>&1
 
 # 午盘/收盘心跳，不触发交易线也会发一次状态（可按需注释）。
 35 11 * * 1-5 root cd $PROJECT_DIR && set -a && source $ENV_FILE && set +a && $PYTHON_BIN scripts/monitor_watchlist.py --force --notify --repeat-heartbeat >> $LOG_DIR/stock_monitor.log 2>&1
