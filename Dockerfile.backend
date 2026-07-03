@@ -7,6 +7,8 @@ FROM python:3.10-slim-bookworm
 
 # 获取构建架构信息
 ARG TARGETARCH
+ARG APT_MIRROR=""
+ARG PDF_TOOLS_SOURCE="github"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -25,32 +27,43 @@ RUN mkdir -p /app/logs /app/data /app/config && \
     echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries && \
     echo 'Acquire::http::Timeout "30";' >> /etc/apt/apt.conf.d/80-retries && \
     echo 'Acquire::https::Timeout "30";' >> /etc/apt/apt.conf.d/80-retries && \
+    if [ -n "$APT_MIRROR" ]; then \
+        sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}/debian|g; s|http://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g" /etc/apt/sources.list.d/debian.sources; \
+    fi && \
     # 更新软件源，允许失败后继续
     (apt-get update || apt-get update || apt-get update) && \
+    if [ "$PDF_TOOLS_SOURCE" = "apt" ]; then \
+        PDF_PACKAGES="pandoc wkhtmltopdf"; \
+    else \
+        PDF_PACKAGES=""; \
+    fi && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         fontconfig \
         fonts-noto-cjk \
         wget \
-        xvfb && \
-    # 根据架构设置变量
-    if [ "$TARGETARCH" = "arm64" ]; then \
-        PANDOC_ARCH="arm64"; \
-        WKHTMLTOPDF_ARCH="arm64"; \
-    else \
-        PANDOC_ARCH="amd64"; \
-        WKHTMLTOPDF_ARCH="amd64"; \
+        xvfb \
+        $PDF_PACKAGES && \
+    if [ "$PDF_TOOLS_SOURCE" = "github" ]; then \
+        # 根据架构设置变量
+        if [ "$TARGETARCH" = "arm64" ]; then \
+            PANDOC_ARCH="arm64"; \
+            WKHTMLTOPDF_ARCH="arm64"; \
+        else \
+            PANDOC_ARCH="amd64"; \
+            WKHTMLTOPDF_ARCH="amd64"; \
+        fi && \
+        # 下载并安装 pandoc
+        wget -q https://github.com/jgm/pandoc/releases/download/3.8.2.1/pandoc-3.8.2.1-1-${PANDOC_ARCH}.deb && \
+        dpkg -i pandoc-3.8.2.1-1-${PANDOC_ARCH}.deb && \
+        rm pandoc-3.8.2.1-1-${PANDOC_ARCH}.deb && \
+        # 下载并安装 wkhtmltopdf
+        wget -q https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.bookworm_${WKHTMLTOPDF_ARCH}.deb && \
+        apt-get install -y --no-install-recommends \
+            ./wkhtmltox_0.12.6.1-3.bookworm_${WKHTMLTOPDF_ARCH}.deb && \
+        rm wkhtmltox_0.12.6.1-3.bookworm_${WKHTMLTOPDF_ARCH}.deb; \
     fi && \
-    # 下载并安装 pandoc
-    wget -q https://github.com/jgm/pandoc/releases/download/3.8.2.1/pandoc-3.8.2.1-1-${PANDOC_ARCH}.deb && \
-    dpkg -i pandoc-3.8.2.1-1-${PANDOC_ARCH}.deb && \
-    rm pandoc-3.8.2.1-1-${PANDOC_ARCH}.deb && \
-    # 下载并安装 wkhtmltopdf
-    wget -q https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.bookworm_${WKHTMLTOPDF_ARCH}.deb && \
-    apt-get install -y --no-install-recommends \
-        ./wkhtmltox_0.12.6.1-3.bookworm_${WKHTMLTOPDF_ARCH}.deb && \
-    rm wkhtmltox_0.12.6.1-3.bookworm_${WKHTMLTOPDF_ARCH}.deb && \
     # 更新字体缓存
     fc-cache -fv && \
     rm -rf /var/lib/apt/lists/*

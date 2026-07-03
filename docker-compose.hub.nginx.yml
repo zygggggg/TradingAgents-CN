@@ -68,6 +68,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+      args:
+        APT_MIRROR: "${APT_MIRROR:-}"
+        PDF_TOOLS_SOURCE: "${PDF_TOOLS_SOURCE:-github}"
     image: hsliup/tradingagents-backend:v1.0.1
     container_name: tradingagents-backend
     restart: unless-stopped
@@ -205,4 +208,3 @@ volumes:
 networks:
   tradingagents-network:
     driver: bridge
-
