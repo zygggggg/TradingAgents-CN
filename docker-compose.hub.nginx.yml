@@ -71,6 +71,7 @@ services:
       args:
         APT_MIRROR: "${APT_MIRROR:-}"
         PDF_TOOLS_SOURCE: "${PDF_TOOLS_SOURCE:-github}"
+        PYPI_INDEX_URL: "${PYPI_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
     image: hsliup/tradingagents-backend:v1.0.1
     container_name: tradingagents-backend
     restart: unless-stopped
