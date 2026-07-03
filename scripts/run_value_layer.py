@@ -337,6 +337,7 @@ def build_context(symbol: str, stock_name: str, date: str, raw: dict[str, Any], 
     final_trade = get_state_text(raw, "final_trade_decision") or read_text(report_paths.get("final_trade_decision"))
     risk_report = get_state_text(raw, "risk_debate_state") or read_text(report_paths.get("risk_management_decision"))
     investment_plan = get_state_text(raw, "investment_plan") or get_state_text(raw, "trader_investment_plan") or read_text(report_paths.get("investment_plan")) or read_text(report_paths.get("trader_investment_plan"))
+    eastmoney_skills_context = get_state_text(raw, "eastmoney_skills_context")
     decision = raw.get("decision") if isinstance(raw.get("decision"), dict) else {}
     decision_text = json.dumps(decision, ensure_ascii=False, indent=2) if decision else final_trade
     market_price = extract_market_price(market_report, fundamentals_report, final_trade, decision_text, investment_plan)
@@ -348,6 +349,7 @@ def build_context(symbol: str, stock_name: str, date: str, raw: dict[str, Any], 
         "final_trade": final_trade,
         "risk_report": risk_report,
         "investment_plan": investment_plan,
+        "eastmoney_skills_context": eastmoney_skills_context,
         "decision": decision_text,
         "market_price": "" if market_price is None else f"{market_price:.2f}",
         "price_guard": price_guard,
@@ -410,6 +412,10 @@ def make_user_prompt(context: dict[str, str]) -> str:
 
 ## 当前最终交易决策
 {clip(context['decision'], 1800)}
+
+## 东方财富 Skills 前置上下文
+请价值投资 Agent 优先用这部分校验行情、估值、资金流、财务质量、支撑压力和风险收益比。
+{clip(context.get('eastmoney_skills_context', ''), 9000)}
 
 ## 技术/交易报告
 {clip(context['market_report'], 6500)}
@@ -628,6 +634,10 @@ def build_trading_report(symbol: str, stock_name: str, date: str, context: dict[
 
 {clip(context['market_report'], 9000)}
 
+## 东方财富 Skills 前置上下文
+
+{clip(context.get('eastmoney_skills_context', ''), 5000)}
+
 ## 交易/风控计划
 
 {clip(context['investment_plan'] or context['risk_report'], 5000)}
@@ -658,6 +668,10 @@ def build_combined_report(symbol: str, stock_name: str, date: str, trading_repor
 ## 当前交易系统结论
 
 {clip(context['decision'], 1600)}
+
+## 东方财富 Skills 关键数据
+
+{clip(context.get('eastmoney_skills_context', ''), 3500)}
 
 ## 长线价值委员会摘要
 

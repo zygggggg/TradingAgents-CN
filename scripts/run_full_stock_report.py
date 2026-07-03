@@ -25,7 +25,6 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 from scripts.report_paths import analysis_stock_dir, safe_name
-from scripts.agent_memory_utils import format_memory_reflection_section, run_auto_reflection, write_memory_status_file
 from scripts.run_event_agent_report import build_agent_config, load_env_file, to_jsonable
 from scripts.send_dingtalk import send_markdown
 from tradingagents.dataflows.fundamentals_quality import ensure_fundamentals_quality
@@ -198,11 +197,11 @@ def build_learning_report(symbol: str, stock_name: str, analysis_date: str, deci
 """
 
 
-def run_graph(symbol: str, analysis_date: str, analysts: List[str]):
+def run_graph(symbol: str, analysis_date: str, analysts: List[str], eastmoney_skills_context: str = ""):
     from tradingagents.graph.trading_graph import TradingAgentsGraph
 
     graph = TradingAgentsGraph(selected_analysts=analysts, debug=False, config=build_agent_config())
-    state, decision = graph.propagate(symbol, analysis_date)
+    state, decision = graph.propagate(symbol, analysis_date, initial_context=eastmoney_skills_context)
     return graph, state, decision
 
 
@@ -299,6 +298,23 @@ def _strip_raw_json_section(markdown_text: str) -> str:
     return str(markdown_text or "").split("## 原始返回JSON", 1)[0].strip()
 
 
+def build_eastmoney_agent_context(eastmoney_appendix: str) -> str:
+    text = str(eastmoney_appendix or "").strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+    if lines and lines[0].startswith("## 10."):
+        lines[0] = "# 东方财富 Skills 前置上下文"
+    text = "\n".join(lines).strip()
+    try:
+        max_chars = int(os.getenv("EASTMONEY_SKILLS_AGENT_CONTEXT_CHARS", "24000"))
+    except Exception:
+        max_chars = 24000
+    if max_chars > 0 and len(text) > max_chars:
+        text = text[:max_chars].rstrip()
+    return text
+
+
 def build_eastmoney_skills_appendix(
     symbol: str,
     stock_name: str,
@@ -325,9 +341,9 @@ def build_eastmoney_skills_appendix(
         "",
     ]
     jobs = [
+        ("diagnose", "综合诊股", paths["eastmoney_diagnose"], lambda: client.stock_diagnosis_report(symbol, stock_name=stock_name)),
         ("fundamentals", "金融数据 / 财务透视", paths["eastmoney_fundamentals"], lambda: client.fundamentals_report(symbol, stock_name=stock_name, report_count=5)),
         ("news", "资讯搜索 / 公告研报", paths["eastmoney_news"], lambda: client.news_report(symbol, stock_name=stock_name, limit_hint=10)),
-        ("diagnose", "综合诊股", paths["eastmoney_diagnose"], lambda: client.stock_diagnosis_report(symbol, stock_name=stock_name)),
     ]
 
     for key, title, output_path, runner in jobs:
@@ -416,7 +432,6 @@ def main() -> None:
         "learn": stock_dir / f"{prefix}-learn.md",
         "raw": stock_dir / f"{prefix}-raw.json",
         "status": stock_dir / f"{prefix}-run.status.json",
-        "memory": stock_dir / f"{prefix}-memory.json",
         "quant": stock_dir / f"{prefix}-quant.md",
         "quant_json": stock_dir / f"{prefix}-quant.json",
         "quant_backtest": stock_dir / f"{prefix}-quant-backtest.md",
@@ -430,7 +445,11 @@ def main() -> None:
     write_status(paths["status"], {"status": "running", "symbol": symbol, "stock_name": stock_name, "date": args.date})
     value_result: Dict[str, Any] = {}
     try:
-        graph, state, decision = run_graph(symbol, args.date, analysts)
+        eastmoney_appendix, eastmoney_skills = build_eastmoney_skills_appendix(symbol, stock_name, paths)
+        eastmoney_skills_context = build_eastmoney_agent_context(eastmoney_appendix)
+        graph, state, decision = run_graph(symbol, args.date, analysts, eastmoney_skills_context)
+        if eastmoney_skills_context:
+            state["eastmoney_skills_context"] = eastmoney_skills_context
         fundamentals_text = str(state.get("fundamentals_report") or "")
         fundamentals_text, fundamentals_quality = ensure_fundamentals_quality(symbol, fundamentals_text)
         state["fundamentals_report"] = fundamentals_text
@@ -438,7 +457,6 @@ def main() -> None:
         fundamentals_text = str(state.get("fundamentals_report") or "")
         fundamentals_text, fundamentals_quality = ensure_fundamentals_quality(symbol, fundamentals_text)
         state["fundamentals_report"] = fundamentals_text
-        eastmoney_appendix, eastmoney_skills = build_eastmoney_skills_appendix(symbol, stock_name, paths)
         raw = {
             "stock_symbol": symbol,
             "symbol": symbol,
@@ -454,28 +472,9 @@ def main() -> None:
             "generated_at": now_cn().strftime("%Y-%m-%d %H:%M:%S"),
         }
         write_json(paths["raw"], raw)
-        try:
-            memory_result = run_auto_reflection(
-                graph=graph,
-                symbol=symbol,
-                stock_name=stock_name,
-                analysis_date=args.date,
-                final_state=state,
-                decision=decision,
-                report_path=paths["report"],
-            )
-        except Exception as memory_exc:
-            memory_result = {
-                "enabled": True,
-                "status": "failed_non_blocking",
-                "error": f"{type(memory_exc).__name__}: {memory_exc}",
-            }
-        write_memory_status_file(paths["memory"], memory_result)
         report_text = build_full_report(symbol, stock_name, args.date, state, decision, analysts)
         if eastmoney_appendix:
             report_text += "\n" + eastmoney_appendix
-        memory_section_no = "11" if eastmoney_appendix else "10"
-        report_text += f"\n## {memory_section_no}. Memory自动复盘写入\n\n" + format_memory_reflection_section(memory_result) + "\n"
         learning_text = build_learning_report(symbol, stock_name, args.date, decision)
         ensure_no_truncation_markers({"report": report_text, "learn": learning_text})
         ensure_report_price_guard(report_text, fundamentals_text, label="full_report")
@@ -506,7 +505,6 @@ def main() -> None:
                 "quant_backtest": backtest_result,
                 "fundamentals_quality": fundamentals_quality,
                 "eastmoney_skills": eastmoney_skills,
-                "memory_reflection": memory_result,
             },
         )
         send_completion(args, paths, value_result, "已完成")

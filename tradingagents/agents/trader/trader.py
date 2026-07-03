@@ -4,6 +4,7 @@ import json
 
 # 导入统一日志系统
 from tradingagents.utils.logging_init import get_logger
+from tradingagents.agents.utils.skills_context import format_eastmoney_skills_context_block
 from tradingagents.agents.utils.instrument_utils import build_instrument_context
 logger = get_logger("default")
 
@@ -17,6 +18,7 @@ def create_trader(llm, memory):
         sentiment_report = state["sentiment_report"]
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
+        eastmoney_skills_context = format_eastmoney_skills_context_block(state)
 
         # 使用统一的股票类型检测
         from tradingagents.utils.stock_utils import StockUtils
@@ -36,7 +38,7 @@ def create_trader(llm, memory):
         logger.debug(f"💰 [DEBUG] 基本面报告长度: {len(fundamentals_report)}")
         logger.debug(f"💰 [DEBUG] 基本面报告前200字符: {fundamentals_report[:200]}...")
 
-        curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
+        curr_situation = f"{eastmoney_skills_context}\n\n{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
 
         # 检查memory是否可用
         if memory is not None:
@@ -52,7 +54,7 @@ def create_trader(llm, memory):
 
         context = {
             "role": "user",
-            "content": f"Based on a comprehensive analysis by a team of analysts, here is an investment plan tailored for {company_name}. This plan incorporates insights from current technical market trends, macroeconomic indicators, and social media sentiment. Use this plan as a foundation for evaluating your next trading decision.\n\nProposed Investment Plan: {investment_plan}\n\nLeverage these insights to make an informed and strategic decision.",
+            "content": f"Based on a comprehensive analysis by a team of analysts, here is an investment plan tailored for {company_name}. This plan incorporates insights from current technical market trends, macroeconomic indicators, and social media sentiment. Use this plan as a foundation for evaluating your next trading decision.\n\nProposed Investment Plan: {investment_plan}\n\nEastmoney Skills Context:\n{eastmoney_skills_context}\n\nLeverage these insights to make an informed and strategic decision.",
         }
 
         messages = [
@@ -67,17 +69,20 @@ def create_trader(llm, memory):
 - 股票代码 {company_name} 的公司名称必须严格按照基本面报告中的真实数据
 - 绝对禁止使用错误的公司名称或混淆不同的股票
 - 所有分析必须基于提供的真实数据，不允许假设或编造
+- 东方财富 Skills 前置上下文是优先校验行情、估值、资金流、财务质量、支撑压力的数据源
 - **必须提供具体的目标价位，不允许设置为null或空值**
 
 请在您的分析中包含以下关键信息：
-1. **投资建议**: 明确的买入/持有/卖出决策
-2. **目标价位**: 基于分析的合理目标价格({currency}) - 🚨 强制要求提供具体数值
+1. **林奇式分栏**: 用“观察池 / 等待价格 / 可买入区间”三栏表达结论，不要只写“推荐买入”
+2. **投资建议**: 明确的买入/持有/卖出决策，并说明它对应三栏中的哪一栏
+3. **目标价位**: 基于分析的合理目标价格({currency}) - 🚨 强制要求提供具体数值
    - 买入建议：提供目标价位和预期涨幅
    - 持有建议：提供合理价格区间（如：{currency_symbol}XX-XX）
    - 卖出建议：提供止损价位和目标卖出价
-3. **置信度**: 对决策的信心程度(0-1之间)
-4. **风险评分**: 投资风险等级(0-1之间，0为低风险，1为高风险)
-5. **详细推理**: 支持决策的具体理由
+4. **置信度**: 对决策的信心程度(0-1之间)
+5. **风险评分**: 投资风险等级(0-1之间，0为低风险，1为高风险)
+6. **详细推理**: 支持决策的具体理由
+7. **低优先级标注**: 如果存在近60日/250日涨幅过大、纯题材驱动、估值透支、基本面未验证、成交过热等情况，不要禁止推荐，但必须标注“低优先级/仅观察”并说明原因
 
 🎯 目标价位计算指导：
 - 基于基本面分析中的估值数据（P/E、P/B、DCF等）
@@ -93,7 +98,7 @@ def create_trader(llm, memory):
 - 必须使用基本面报告中提供的正确公司名称
 - **绝对不允许说"无法确定目标价"或"需要更多信息"**
 
-请用中文撰写分析内容，并始终以'最终交易建议: **买入/持有/卖出**'结束您的回应以确认您的建议。
+请用中文撰写分析内容，并始终以'最终交易建议: **买入/持有/卖出**；林奇分栏: **观察池/等待价格/可买入区间**'结束您的回应以确认您的建议。
 
 请不要忘记利用过去决策的经验教训来避免重复错误。以下是类似情况下的交易反思和经验教训: {past_memory_str}""",
             },

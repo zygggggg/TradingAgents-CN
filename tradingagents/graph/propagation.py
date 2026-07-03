@@ -20,7 +20,7 @@ class Propagator:
         self.max_recur_limit = max_recur_limit
 
     def create_initial_state(
-        self, company_name: str, trade_date: str
+        self, company_name: str, trade_date: str, initial_context: str = ""
     ) -> Dict[str, Any]:
         """Create the initial state for the agent graph."""
         from langchain_core.messages import HumanMessage
@@ -28,11 +28,22 @@ class Propagator:
         # 🔥 修复：创建明确的分析请求消息，而不是只传递股票代码
         # 这样可以确保所有LLM（包括DeepSeek）都能理解任务
         analysis_request = f"请对股票 {company_name} 进行全面分析，交易日期为 {trade_date}。"
+        eastmoney_skills_context = str(initial_context or "").strip()
+        if eastmoney_skills_context:
+            analysis_request = (
+                f"{analysis_request}\n\n"
+                "## 东方财富 Skills 前置上下文\n"
+                "以下数据来自东方财富 Skills / OpenClaw。请所有分析师优先用它校验"
+                "行情、估值、资金流、财务质量、新闻催化、支撑压力位和风险收益比；"
+                "如与其他来源冲突，请显式说明差异。\n\n"
+                f"{eastmoney_skills_context}"
+            )
 
         return {
             "messages": [HumanMessage(content=analysis_request)],
             "company_of_interest": company_name,
             "trade_date": str(trade_date),
+            "eastmoney_skills_context": eastmoney_skills_context,
             "investment_debate_state": InvestDebateState(
                 {"history": "", "current_response": "", "count": 0}
             ),

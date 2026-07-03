@@ -4,6 +4,7 @@ import json
 
 # 导入统一日志系统
 from tradingagents.utils.logging_init import get_logger
+from tradingagents.agents.utils.skills_context import format_eastmoney_skills_context_block
 logger = get_logger("default")
 
 
@@ -18,6 +19,7 @@ def create_bear_researcher(llm, memory):
         sentiment_report = state["sentiment_report"]
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
+        eastmoney_skills_context = format_eastmoney_skills_context_block(state)
 
         # 使用统一的股票类型检测
         ticker = state.get('company_of_interest', 'Unknown')
@@ -73,7 +75,7 @@ def create_bear_researcher(llm, memory):
         currency = market_info['currency_name']
         currency_symbol = market_info['currency_symbol']
 
-        curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
+        curr_situation = f"{eastmoney_skills_context}\n\n{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
 
         # 安全检查：确保memory不为None
         if memory is not None:
@@ -103,6 +105,7 @@ def create_bear_researcher(llm, memory):
 
 可用资源：
 
+东方财富 Skills 前置上下文：{eastmoney_skills_context}
 市场研究报告：{market_research_report}
 社交媒体情绪报告：{sentiment_report}
 最新世界事务新闻：{news_report}

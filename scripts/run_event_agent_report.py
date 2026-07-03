@@ -20,7 +20,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.agent_memory_utils import format_memory_reflection_section, run_auto_reflection, write_memory_status_file
 from scripts.explain_monitor_event import collect_report_context, fetch_recent_klines, format_klines
 from scripts.send_dingtalk import send_markdown
 from tradingagents.dataflows.fundamentals_quality import ensure_fundamentals_quality
@@ -84,11 +83,49 @@ def clip(text: Any, limit: int | None = None) -> str:
     return str(text or "").strip()
 
 
+TRUNCATION_FORBIDDEN_PATTERNS = ("原文过长", "已截断", "内容过长", "内容已截断", "数据已截断", "truncated")
+PRICE_DERIVATION_FORBIDDEN_PATTERNS = (
+    "隐含",
+    "反推",
+    "PE×EPS",
+    "PE × EPS",
+    "EPS×PE",
+    "EPS × PE",
+    "PE与EPS互算",
+    "EPS与PE互算",
+)
+
+
 def ensure_no_truncation_markers(text: str, output_path: Path) -> None:
-    bad_markers = ["原文过长", "已截断", "内容过长", "内容已截断", "数据已截断"]
-    hits = [marker for marker in bad_markers if marker in text]
+    hits = [marker for marker in TRUNCATION_FORBIDDEN_PATTERNS if marker in text]
     if hits:
         raise RuntimeError(f"事件报告包含截断标记 {hits}: {output_path}")
+
+
+def _is_forbidden_price_derivation_line(line: str) -> bool:
+    if any(marker in line for marker in PRICE_DERIVATION_FORBIDDEN_PATTERNS):
+        return True
+    if "÷" in line and any(term in line for term in ("PE", "PB", "市盈率", "市净率", "收盘价", "当前价", "最新价")):
+        return True
+    if "测算" in line and any(term in line for term in ("PE", "PB", "市盈率", "市净率", "每股收益", "每股净资产")):
+        return True
+    return False
+
+
+def sanitize_report_text(text: Any) -> str:
+    lines = []
+    skip_next_quote_formula = False
+    for line in str(text or "").splitlines():
+        if any(marker in line for marker in TRUNCATION_FORBIDDEN_PATTERNS):
+            continue
+        if _is_forbidden_price_derivation_line(line):
+            skip_next_quote_formula = True
+            continue
+        if skip_next_quote_formula and line.strip().startswith(">"):
+            continue
+        skip_next_quote_formula = False
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def sanitize_prior_context(text: Any) -> str:
@@ -97,8 +134,22 @@ def sanitize_prior_context(text: Any) -> str:
     for line in str(text or "").splitlines():
         if any(item in line for item in forbidden):
             continue
+        if any(marker in line for marker in TRUNCATION_FORBIDDEN_PATTERNS):
+            continue
+        if _is_forbidden_price_derivation_line(line):
+            continue
         lines.append(line)
     return "\n".join(lines).strip()
+
+
+def sanitize_status_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): sanitize_status_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitize_status_payload(item) for item in value]
+    if isinstance(value, str):
+        return sanitize_report_text(value)
+    return value
 
 def derive_paths(event: Dict[str, Any], stock: Dict[str, Any], quick_report: Optional[Path]) -> Dict[str, Path]:
     stock_name = safe_filename(event.get("name") or stock.get("name") or event.get("symbol") or stock.get("symbol"))
@@ -121,13 +172,12 @@ def derive_paths(event: Dict[str, Any], stock: Dict[str, Any], quick_report: Opt
         "report": report_path,
         "state": report_path.with_suffix(".state.json"),
         "status": report_path.with_suffix(".status.json"),
-        "memory": report_path.with_suffix(".memory.json"),
     }
 
 
 def write_status(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = dict(payload)
+    payload = sanitize_status_payload(dict(payload))
     payload["updated_at"] = now_cn().isoformat()
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -406,30 +456,11 @@ def main() -> None:
             ),
             encoding="utf-8",
         )
-        try:
-            memory_result = run_auto_reflection(
-                graph=result.get("graph"),
-                symbol=symbol,
-                stock_name=stock_name,
-                analysis_date=analysis_date,
-                final_state=result.get("final_state") or {},
-                decision=result.get("decision"),
-                event=event,
-                stock=stock,
-                report_path=paths["report"],
-            )
-        except Exception as memory_exc:
-            memory_result = {
-                "enabled": True,
-                "status": "failed_non_blocking",
-                "error": f"{type(memory_exc).__name__}: {memory_exc}",
-            }
-        write_memory_status_file(paths["memory"], memory_result)
         markdown = build_markdown(event, stock, quick_report, result)
-        markdown += "\n## 13. Memory自动复盘写入\n\n" + format_memory_reflection_section(memory_result) + "\n"
+        markdown = sanitize_report_text(markdown) + "\n"
         ensure_no_truncation_markers(markdown, paths["report"])
         paths["report"].write_text(markdown, encoding="utf-8")
-        write_status(paths["status"], {"status": "completed", "report_path": str(paths["report"]), "state_path": str(paths["state"]), "memory_path": str(paths["memory"]), "memory_reflection": memory_result})
+        write_status(paths["status"], {"status": "completed", "report_path": str(paths["report"]), "state_path": str(paths["state"])})
         print("agent_report=%s" % paths["report"])
         if args.notify:
             load_env_file(ROOT / ".stock-monitor.env")

@@ -130,6 +130,13 @@ export interface StockInfo {
   amount?: number        // 成交额
   turnover_rate?: number // 换手率(%)
   volume_ratio?: number  // 量比
+  return_60d?: number    // 近60个交易日涨幅(%)
+  return_250d?: number   // 近250个交易日涨幅(%)
+
+  // 彼得林奇式筛选辅助字段
+  lynch_score?: number
+  lynch_priority?: string
+  lynch_notes?: string[]
 
   // 技术指标
   ma20?: number          // 20日均线

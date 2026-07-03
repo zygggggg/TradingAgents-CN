@@ -4,6 +4,7 @@ import json
 
 # 导入统一日志系统
 from tradingagents.utils.logging_init import get_logger
+from tradingagents.agents.utils.skills_context import format_eastmoney_skills_context_block
 logger = get_logger("default")
 
 
@@ -20,6 +21,7 @@ def create_bull_researcher(llm, memory):
         sentiment_report = state["sentiment_report"]
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
+        eastmoney_skills_context = format_eastmoney_skills_context_block(state)
 
         # 使用统一的股票类型检测
         ticker = state.get('company_of_interest', 'Unknown')
@@ -84,7 +86,7 @@ def create_bull_researcher(llm, memory):
         logger.debug(f"🐂 [DEBUG] - 股票代码: {ticker}, 公司名称: {company_name}, 类型: {market_info['market_name']}, 货币: {currency}")
         logger.debug(f"🐂 [DEBUG] - 市场详情: 中国A股={is_china}, 港股={is_hk}, 美股={is_us}")
 
-        curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
+        curr_situation = f"{eastmoney_skills_context}\n\n{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
 
         # 安全检查：确保memory不为None
         if memory is not None:
@@ -112,6 +114,7 @@ def create_bull_researcher(llm, memory):
 - 参与讨论：以对话风格呈现你的论点，直接回应看跌分析师的观点并进行有效辩论，而不仅仅是列举数据
 
 可用资源：
+东方财富 Skills 前置上下文：{eastmoney_skills_context}
 市场研究报告：{market_research_report}
 社交媒体情绪报告：{sentiment_report}
 最新世界事务新闻：{news_report}

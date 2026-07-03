@@ -86,6 +86,8 @@ def _ensure_price_guard(report: str, source_text: str) -> None:
                 continue
             if re.search(r"(?:价差|收益|亏损|回撤|上涨空间|下跌空间)[^\n]{0,16}\d+(?:\.\d+)?\s*[-—–~至到]\s*\d+(?:\.\d+)?\s*元", context):
                 continue
+            if re.search(r"(?:距离|价差|差额|相差|只有|仅)[^\n]{0,32}\d+(?:\.\d+)?\s*元", context):
+                continue
             if 0 < value < price * 0.35:
                 suspicious.append(value)
     if suspicious:

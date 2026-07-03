@@ -3,6 +3,7 @@ import json
 
 # 导入统一日志系统
 from tradingagents.utils.logging_init import get_logger
+from tradingagents.agents.utils.skills_context import format_eastmoney_skills_context_block
 logger = get_logger("default")
 
 
@@ -19,6 +20,7 @@ def create_risky_debator(llm):
         sentiment_report = state["sentiment_report"]
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
+        eastmoney_skills_context = format_eastmoney_skills_context_block(state)
 
         trader_decision = state["trader_investment_plan"]
 
@@ -46,6 +48,7 @@ def create_risky_debator(llm):
 社交媒体情绪报告：{sentiment_report}
 最新世界事务报告：{news_report}
 公司基本面报告：{fundamentals_report}
+东方财富 Skills 前置上下文：{eastmoney_skills_context}
 以下是当前对话历史：{history} 以下是保守分析师的最后论点：{current_safe_response} 以下是中性分析师的最后论点：{current_neutral_response}。如果其他观点没有回应，请不要虚构，只需提出您的观点。
 
 积极参与，解决提出的任何具体担忧，反驳他们逻辑中的弱点，并断言承担风险的好处以超越市场常规。专注于辩论和说服，而不仅仅是呈现数据。挑战每个反驳点，强调为什么高风险方法是最优的。请用中文以对话方式输出，就像您在说话一样，不使用任何特殊格式。"""

@@ -3,6 +3,7 @@ import json
 
 # 导入统一日志系统
 from tradingagents.utils.logging_init import get_logger
+from tradingagents.agents.utils.skills_context import format_eastmoney_skills_context_block
 from tradingagents.agents.utils.instrument_utils import build_instrument_context
 logger = get_logger("default")
 
@@ -16,10 +17,11 @@ def create_research_manager(llm, memory):
         sentiment_report = state["sentiment_report"]
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
+        eastmoney_skills_context = format_eastmoney_skills_context_block(state)
 
         investment_debate_state = state["investment_debate_state"]
 
-        curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
+        curr_situation = f"{eastmoney_skills_context}\n\n{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
 
         # 安全检查：确保memory不为None
         if memory is not None:
@@ -38,9 +40,10 @@ def create_research_manager(llm, memory):
 
 此外，为交易员制定详细的投资计划。这应该包括：
 
-您的建议：基于最有说服力论点的明确立场。
+您的建议：基于最有说服力论点的明确立场，但不要把结论直接包装成“推荐买入”。请改用“观察池 / 等待价格 / 可买入区间”三栏表达。
 理由：解释为什么这些论点导致您的结论。
 战略行动：实施建议的具体步骤。
+彼得林奇式优先级标注：如果标的存在近60日或近250日涨幅过大、纯题材驱动、估值明显透支、基本面尚未验证、成交过热等情况，不要禁止讨论，但必须标为“低优先级/仅观察”，并注明原因和需要等待的价格或基本面验证条件。
 📊 目标价格分析：基于所有可用报告（基本面、新闻、情绪），提供全面的目标价格区间和具体价格目标。考虑：
 - 基本面报告中的基本估值
 - 新闻对价格预期的影响
@@ -57,6 +60,8 @@ def create_research_manager(llm, memory):
 
 标的约束：
 {instrument_context}
+
+东方财富 Skills 前置上下文：{eastmoney_skills_context}
 
 以下是综合分析报告：
 市场研究：{market_research_report}

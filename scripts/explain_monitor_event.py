@@ -13,6 +13,30 @@ from typing import Any, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 
+TRUNCATION_FORBIDDEN_PATTERNS = (
+    "原文过长",
+    "内容过长",
+    "已截断",
+    "内容已截断",
+    "数据已截断",
+    "truncated",
+)
+
+
+def has_truncation_marker(text):
+    # type: (str) -> bool
+    return any(marker in str(text or "") for marker in TRUNCATION_FORBIDDEN_PATTERNS)
+
+
+def sanitize_context_text(text):
+    # type: (str) -> str
+    lines = []
+    for line in str(text or "").splitlines():
+        if has_truncation_marker(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
 
 def load_env_file(path):
     # type: (Path) -> None
@@ -183,7 +207,7 @@ def latest_quote_from_klines(symbol):
 def read_text(path, limit):
     # type: (Path, int) -> str
     text = path.read_text(encoding="utf-8", errors="ignore")
-    return text[:limit]
+    return sanitize_context_text(text[:limit])
 
 
 def collect_report_context(root, symbol, stock_name, plan_date="", total_limit=14000):

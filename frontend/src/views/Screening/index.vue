@@ -30,6 +30,9 @@
             </el-tag>
           </div>
           <div class="header-actions">
+            <el-button type="primary" plain @click="applyLynchPreset">
+              彼得林奇模式
+            </el-button>
             <el-button type="text" @click="resetFilters">
               <el-icon><Refresh /></el-icon>
               重置
@@ -39,6 +42,14 @@
       </template>
 
       <el-form :model="filters" label-width="120px" class="filter-form">
+        <el-alert
+          v-if="filters.strategyPreset === 'lynch'"
+          class="strategy-alert"
+          type="success"
+          show-icon
+          :closable="false"
+          title="彼得林奇模式：优先30-500亿小中盘、PE 5-25、PB 0.8-3、ROE>12、成交额中低；近60/250日涨幅过大或热门拥挤不会禁用，但会降优先级并标注原因。"
+        />
         <el-row :gutter="24">
           <!-- 基础信息 -->
           <el-col :span="8">
@@ -71,6 +82,7 @@
           <el-col :span="8">
             <el-form-item label="市值范围">
               <el-select v-model="filters.marketCapRange" placeholder="选择市值范围">
+                <el-option label="林奇小中盘 (30-500亿)" value="lynch" />
                 <el-option label="小盘股 (< 100亿)" value="small" />
                 <el-option label="中盘股 (100-500亿)" value="medium" />
                 <el-option label="大盘股 (> 500亿)" value="large" />
@@ -169,6 +181,7 @@
               <el-select v-model="filters.volumeLevel" placeholder="选择成交量水平">
                 <el-option label="活跃 (高成交量)" value="high" />
                 <el-option label="正常 (中等成交量)" value="medium" />
+                <el-option label="中低成交额 (<10亿元)" value="medium_low" />
                 <el-option label="清淡 (低成交量)" value="low" />
               </el-select>
             </el-form-item>
@@ -305,6 +318,29 @@
           </template>
         </el-table-column>
 
+        <el-table-column prop="lynch_score" label="林奇评分" width="110" align="right">
+          <template #default="{ row }">
+            <span v-if="row.lynch_score !== null && row.lynch_score !== undefined">{{ row.lynch_score?.toFixed(1) }}</span>
+            <span v-else class="text-gray-400">-</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="lynch_priority" label="林奇标注" width="150">
+          <template #default="{ row }">
+            <el-tooltip
+              v-if="row.lynch_notes && row.lynch_notes.length"
+              effect="dark"
+              :content="row.lynch_notes.join('；')"
+              placement="top"
+            >
+              <el-tag :type="row.lynch_priority === '低优先级' ? 'warning' : 'success'" size="small">
+                {{ row.lynch_priority || '观察池' }}
+              </el-tag>
+            </el-tooltip>
+            <el-tag v-else type="success" size="small">{{ row.lynch_priority || '观察池' }}</el-tag>
+          </template>
+        </el-table-column>
+
         <el-table-column prop="board" label="板块" width="100">
           <template #default="{ row }">
             {{ row.board || '-' }}
@@ -396,6 +432,7 @@ const fieldsLoading = ref(false)
 // 筛选条件
 const filters = reactive({
   market: 'A股',
+  strategyPreset: '',
   industry: [] as string[],
   marketCapRange: '',
   peRatio: { min: null, max: null },
@@ -438,6 +475,7 @@ const performScreening = async () => {
 
     // 市值范围映射为区间（单位：亿元 → 转换为万元以匹配后端 market_cap 单位）
     const capRangeMap: Record<string, [number, number] | null> = {
+      lynch: [30 * 10000, 500 * 10000],
       small: [0, 100 * 10000], // <100亿 → < 100*1e4 万元
       medium: [100 * 10000, 500 * 10000],
       large: [500 * 10000, Number.MAX_SAFE_INTEGER],
@@ -475,6 +513,7 @@ const performScreening = async () => {
       const volumeRangeMap: Record<string, [number, number]> = {
         high: [1000000000, Number.MAX_SAFE_INTEGER],    // 高成交量：>10亿元
         medium: [300000000, 1000000000],                 // 中等成交量：3亿-10亿元
+        medium_low: [0, 1000000000],                     // 中低成交额：<10亿元
         low: [0, 300000000]                              // 低成交量：<3亿元
       }
       const volumeRange = volumeRangeMap[filters.volumeLevel]
@@ -490,7 +529,7 @@ const performScreening = async () => {
       date: undefined,
       adj: 'qfq' as const,
       conditions: { logic: 'AND', children },
-      order_by: [{ field: 'market_cap', direction: 'desc' as const }],
+      order_by: [{ field: 'lynch_score', direction: 'desc' as const }],
       limit: 500,
       offset: 0,
     }
@@ -531,6 +570,11 @@ const performScreening = async () => {
       amount: it.amount,
       turnover_rate: it.turnover_rate,
       volume_ratio: it.volume_ratio,
+      return_60d: it.return_60d,
+      return_250d: it.return_250d,
+      lynch_score: it.lynch_score,
+      lynch_priority: it.lynch_priority,
+      lynch_notes: it.lynch_notes || [],
 
       // 技术指标
       ma20: it.ma20,
@@ -554,6 +598,7 @@ const performScreening = async () => {
 const resetFilters = () => {
   Object.assign(filters, {
     market: 'A股',
+    strategyPreset: '',
     industry: [],
     marketCapRange: '',
     peRatio: { min: null, max: null },
@@ -568,6 +613,20 @@ const resetFilters = () => {
   selectedStocks.value = []
   hasSearched.value = false
   currentPage.value = 1
+}
+
+const applyLynchPreset = () => {
+  Object.assign(filters, {
+    market: 'A股',
+    strategyPreset: 'lynch',
+    marketCapRange: 'lynch',
+    peRatio: { min: 5, max: 25 },
+    pbRatio: { min: 0.8, max: 3 },
+    roe: { min: 12, max: null },
+    changePercent: { min: null, max: 8 },
+    volumeLevel: 'medium_low'
+  })
+  ElMessage.success('已应用彼得林奇模式：结果默认按林奇评分排序，热门/涨幅过大标的会被标注为低优先级。')
 }
 
 const handleSelectionChange = (selection: StockInfo[]) => {
@@ -681,7 +740,10 @@ const getChangeClass = (changePercent: number) => {
   return ''
 }
 
-const formatMarketCap = (marketCap: number) => {
+const formatMarketCap = (marketCap?: number | null) => {
+  if (marketCap === null || marketCap === undefined || Number.isNaN(Number(marketCap))) {
+    return '-'
+  }
   if (marketCap >= 10000) {
     return `${(marketCap / 10000).toFixed(2)}万亿`
   } else {
@@ -811,6 +873,10 @@ onMounted(() => {
     }
 
     .filter-form {
+      .strategy-alert {
+        margin-bottom: 18px;
+      }
+
       .filter-actions {
         display: flex;
         justify-content: center;

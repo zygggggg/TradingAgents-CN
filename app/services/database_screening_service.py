@@ -5,12 +5,15 @@
 
 import logging
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.core.database import get_mongo_db
 # from app.models.screening import ScreeningCondition  # 避免循环导入
 
 logger = logging.getLogger(__name__)
+
+
+LYNCH_SORT_FIELD = "lynch_score"
 
 
 class DatabaseScreeningService:
@@ -41,6 +44,7 @@ class DatabaseScreeningService:
             "pe_ttm": "pe_ttm",         # 滚动市盈率
             "pb_mrq": "pb_mrq",         # 最新市净率
             "roe": "roe",                # 净资产收益率（最近一期）
+            LYNCH_SORT_FIELD: LYNCH_SORT_FIELD,  # 彼得林奇式综合评分（运行时计算）
 
             # 交易指标
             "turnover_rate": "turnover_rate",  # 换手率%
@@ -151,21 +155,23 @@ class DatabaseScreeningService:
 
             logger.info(f"📋 数据库查询条件: {query}")
 
-            # 构建排序条件
+            # 构建排序条件；彼得林奇评分需要运行时计算，不能直接交给 MongoDB 排序
             sort_conditions = self._build_sort_conditions(order_by)
+            use_runtime_lynch_sort = self._needs_runtime_lynch_sort(order_by)
 
             # 获取总数
             total_count = await collection.count_documents(query)
 
-            # 执行查询
+            # 执行查询。林奇评分排序需要先拿到候选池再本地排序，否则分页会截断高分标的。
             cursor = collection.find(query)
 
             # 应用排序
-            if sort_conditions:
+            if sort_conditions and not use_runtime_lynch_sort:
                 cursor = cursor.sort(sort_conditions)
 
             # 应用分页
-            cursor = cursor.skip(offset).limit(limit)
+            if not use_runtime_lynch_sort:
+                cursor = cursor.skip(offset).limit(limit)
 
             # 获取结果
             results = []
@@ -179,6 +185,22 @@ class DatabaseScreeningService:
             # 批量查询财务数据（ROE等）- 如果视图中没有包含
             if codes:
                 await self._enrich_with_financial_data(results, codes)
+
+            if use_runtime_lynch_sort:
+                for result in results:
+                    self._attach_lynch_assessment(result)
+                results.sort(key=self._lynch_sort_key, reverse=True)
+                window_end = min(len(results), offset + max(limit * 3, limit, 200))
+                results = results[:window_end]
+                await self._enrich_with_historical_returns(results, [result.get("code") for result in results])
+                for result in results:
+                    self._attach_lynch_assessment(result)
+                results.sort(key=self._lynch_sort_key, reverse=True)
+                results = results[offset:offset + limit]
+            else:
+                await self._enrich_with_historical_returns(results, codes)
+                for result in results:
+                    self._attach_lynch_assessment(result)
 
             logger.info(f"✅ 数据库筛选完成: 总数={total_count}, 返回={len(results)}, 数据源={source}")
 
@@ -231,13 +253,16 @@ class DatabaseScreeningService:
     def _build_sort_conditions(self, order_by: Optional[List[Dict[str, str]]]) -> List[Tuple[str, int]]:
         """构建排序条件"""
         if not order_by:
-            # 默认按总市值降序排序
-            return [("total_mv", -1)]
+            # 默认使用彼得林奇式综合评分，而不是总市值降序，避免天然偏向热门大盘股。
+            return []
         
         sort_conditions = []
         for order in order_by:
             field = order.get("field")
             direction = order.get("direction", "desc")
+
+            if field == LYNCH_SORT_FIELD:
+                continue
             
             # 映射字段名
             db_field = self.basic_fields.get(field)
@@ -249,6 +274,170 @@ class DatabaseScreeningService:
             sort_conditions.append((db_field, sort_direction))
         
         return sort_conditions
+
+    def _needs_runtime_lynch_sort(self, order_by: Optional[List[Dict[str, str]]]) -> bool:
+        """是否需要使用运行时彼得林奇评分排序。"""
+        if not order_by:
+            return True
+        return any(order.get("field") == LYNCH_SORT_FIELD for order in order_by)
+
+    def _safe_number(self, value: Any) -> Optional[float]:
+        try:
+            if value is None or value == "":
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _score_range(self, value: Optional[float], good_low: float, good_high: float, warn_low: float, warn_high: float) -> float:
+        if value is None:
+            return 0.0
+        if good_low <= value <= good_high:
+            return 1.0
+        if warn_low <= value <= warn_high:
+            return 0.55
+        return 0.0
+
+    def _amount_yuan(self, amount: Optional[float]) -> Optional[float]:
+        """兼容不同数据源的成交额单位，尽量换算为元用于热度标注。"""
+        if amount is None:
+            return None
+        # A股全市场成交额若低于 1000 万，通常是“万元”口径；否则按元处理。
+        if amount < 10_000_000:
+            return amount * 10_000
+        return amount
+
+    def _attach_lynch_assessment(self, result: Dict[str, Any]) -> None:
+        """添加彼得林奇式评分与提醒标签。"""
+        pe = self._safe_number(result.get("pe_ttm") if result.get("pe_ttm") is not None else result.get("pe"))
+        pb = self._safe_number(result.get("pb_mrq") if result.get("pb_mrq") is not None else result.get("pb"))
+        roe = self._safe_number(result.get("roe"))
+        total_mv = self._safe_number(result.get("total_mv"))
+        pct_chg = self._safe_number(result.get("pct_chg"))
+        turnover_rate = self._safe_number(result.get("turnover_rate"))
+        amount_yuan = self._amount_yuan(self._safe_number(result.get("amount")))
+
+        score = 0.0
+        score += min(max((roe or 0.0) / 15.0, 0.0), 1.25) * 28.0
+        score += self._score_range(pe, 5.0, 25.0, 0.0, 35.0) * 22.0
+        score += self._score_range(pb, 0.8, 3.0, 0.0, 4.0) * 16.0
+        score += self._score_range(total_mv, 30.0, 500.0, 10.0, 1000.0) * 18.0
+
+        if pct_chg is None:
+            score += 5.0
+        elif -5.0 <= pct_chg <= 3.0:
+            score += 8.0
+        elif pct_chg <= 8.0:
+            score += 4.0
+
+        if turnover_rate is None:
+            score += 3.0
+        elif turnover_rate <= 3.0:
+            score += 5.0
+        elif turnover_rate <= 6.0:
+            score += 2.0
+
+        if amount_yuan is None:
+            score += 2.0
+        elif amount_yuan <= 3e8:
+            score += 3.0
+        elif amount_yuan <= 10e8:
+            score += 1.0
+
+        notes = []
+        priority = "观察池"
+        if pe is None or pe <= 0:
+            notes.append("PE缺失或为负，需确认连续盈利")
+            priority = "低优先级"
+        elif pe > 35:
+            notes.append("估值偏高，可能已透支预期")
+            priority = "低优先级"
+        if pb is not None and pb > 4:
+            notes.append("PB偏高，安全边际不足")
+            priority = "低优先级"
+        if roe is None:
+            notes.append("ROE缺失，需补充财报验证")
+        elif roe < 10:
+            notes.append("ROE低于林奇式基本盘门槛")
+            priority = "低优先级"
+        if total_mv is not None and total_mv > 1000:
+            notes.append("市值偏大，成长弹性可能有限")
+        if pct_chg is not None and pct_chg > 8:
+            notes.append("短期涨幅偏高，推荐后需注明追高风险")
+            priority = "低优先级"
+        return_60d = self._safe_number(result.get("return_60d"))
+        return_250d = self._safe_number(result.get("return_250d"))
+        if return_60d is not None and return_60d > 20:
+            notes.append("近60日涨幅超过20%，属于相对拥挤/追高候选")
+            score -= 10.0
+            priority = "低优先级"
+        if return_250d is not None and return_250d > 60:
+            notes.append("近250日涨幅超过60%，需标注一年涨幅过大")
+            score -= 15.0
+            priority = "低优先级"
+        if turnover_rate is not None and turnover_rate > 8:
+            notes.append("换手率偏高，热度和交易拥挤度较高")
+            priority = "低优先级"
+        if amount_yuan is not None and amount_yuan > 20e8:
+            notes.append("成交额极高，可能是热门拥挤交易")
+            priority = "低优先级"
+
+        result[LYNCH_SORT_FIELD] = round(max(score, 0.0), 2)
+        result["lynch_priority"] = priority
+        result["lynch_notes"] = notes
+
+    def _lynch_sort_key(self, result: Dict[str, Any]) -> Tuple[float, float, float, float]:
+        score = self._safe_number(result.get(LYNCH_SORT_FIELD)) or 0.0
+        roe = self._safe_number(result.get("roe")) or -999.0
+        pe = self._safe_number(result.get("pe_ttm") if result.get("pe_ttm") is not None else result.get("pe"))
+        pb = self._safe_number(result.get("pb_mrq") if result.get("pb_mrq") is not None else result.get("pb"))
+        return (score, roe, -(pe if pe is not None else 9999.0), -(pb if pb is not None else 9999.0))
+
+    async def _enrich_with_historical_returns(self, results: List[Dict[str, Any]], codes: List[str]) -> None:
+        """批量计算近60/250个交易日涨幅，用于林奇模式的不过热标注。"""
+        try:
+            db = get_mongo_db()
+            collection = db["stock_daily_quotes"]
+            clean_codes = [str(code).zfill(6) for code in codes if code]
+            if not clean_codes:
+                return
+
+            start_date = (datetime.now() - timedelta(days=420)).strftime("%Y-%m-%d")
+            cursor = collection.find(
+                {"symbol": {"$in": clean_codes}, "period": "daily", "trade_date": {"$gte": start_date}},
+                projection={"_id": 0, "symbol": 1, "trade_date": 1, "close": 1},
+            ).sort([("symbol", 1), ("trade_date", -1)])
+
+            history_map: Dict[str, List[Dict[str, Any]]] = {}
+            seen_dates: Dict[str, set] = {}
+            async for doc in cursor:
+                symbol = str(doc.get("symbol") or "").zfill(6)
+                if not symbol:
+                    continue
+                trade_date = str(doc.get("trade_date") or "")
+                symbol_seen_dates = seen_dates.setdefault(symbol, set())
+                if trade_date in symbol_seen_dates:
+                    continue
+                symbol_seen_dates.add(trade_date)
+                bucket = history_map.setdefault(symbol, [])
+                if len(bucket) < 251:
+                    bucket.append(doc)
+
+            for result in results:
+                code = str(result.get("code") or "").zfill(6)
+                history = history_map.get(code) or []
+                if len(history) < 2:
+                    continue
+                latest_close = self._safe_number(history[0].get("close"))
+                if latest_close is None or latest_close <= 0:
+                    continue
+                for days, field in ((60, "return_60d"), (250, "return_250d")):
+                    if len(history) > days:
+                        base_close = self._safe_number(history[days].get("close"))
+                        if base_close and base_close > 0:
+                            result[field] = round((latest_close / base_close - 1) * 100, 2)
+        except Exception as e:
+            logger.warning(f"⚠️ 计算历史涨幅失败: {e}")
     
     async def _enrich_with_financial_data(self, results: List[Dict[str, Any]], codes: List[str]) -> None:
         """
